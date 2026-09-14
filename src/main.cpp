@@ -37,6 +37,7 @@ MotorState currentState = DIR_CW;
 float sweepStartYaw = 0; // Yaw saat mulai sweep
 #define SWEEP_DEG 720.0  // 2 putaran penuh = 720°
 
+
 void IRAM_ATTR homingISR() {
   if (millis() - sweepStartTime > 500) {
     sweepStartTime = millis();
@@ -74,8 +75,7 @@ void bacaDanKirim() {
 
 void setup() {
   Serial.begin(115200);
-
-  // WiFi
+  
   Serial.print("Connecting to Wi-Fi");
   WiFi.begin(ssid, password);
   int att = 0;
@@ -88,17 +88,11 @@ void setup() {
                      ? "\nWi-Fi OK: " + WiFi.localIP().toString()
                      : "\nWi-Fi GAGAL. Lanjut tanpa WiFi...");
 
-  // Sensor ultrasonik
   ultrasonicArray.begin();
-
-  // Homing switch
-  pinMode(HOMING_PIN, INPUT_PULLUP);
+  pinMode(HOMING_PIN, INPUT_PULLUP);// Homing switch
   attachInterrupt(digitalPinToInterrupt(HOMING_PIN), homingISR, FALLING);
-
-  // IMU
   imu.begin();
-
-  // Servo
+  
   servo.begin();
   delay(1500);
   servo.resetAngle();
@@ -109,7 +103,7 @@ void setup() {
 }
 
 void loop() {
-  // Update yaw dari IMU
+
   imu.update();
   float currentAngle = imu.getYaw();
 
@@ -137,7 +131,6 @@ void loop() {
     return;
   }
 
-  // Baca sensor & kirim
   ultrasonicArray.readAll();
 
   // Format: sudut_platform,jarak1,...,jarak8

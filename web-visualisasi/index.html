@@ -6,9 +6,13 @@
   <title>Visualisasi Pemetaan 2D Sensor | Tugas Akhir</title>
   <meta name="description" content="Visualisasi interaktif pemetaan 2D berbasis sensor IMU Yaw dengan algoritma RANSAC wall fitting dan phantom point detection." />
 
-  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <!-- Plotly lokal (tidak butuh internet) -->
+  <script src="libs/plotly-2.26.0.min.js"></script>
+  <!-- Font: Inter via system stack (tidak butuh internet) -->
+  <style>
+    :root { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    code, pre { font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace; }
+  </style>
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>

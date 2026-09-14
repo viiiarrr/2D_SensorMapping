@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ESP32Servo.h>
+#include <math.h>
 
 class Servo360Motor {
 private:

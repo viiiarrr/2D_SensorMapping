@@ -41,18 +41,21 @@ OUTLIER_WINDOW = 10     # Jumlah sampel histori per sudut
 MIN_COUNT = 4           # Sudut harus diukur minimal N kali agar ditampilkan
 
 # =====================
-# KONFIGURASI WALL FITTING & PHANTOM DETECTION
+# KONFIGURASI WALL FITTING & NWA PHANTOM DETECTION
 # =====================
-# Split-and-Merge
-SPLIT_THRESHOLD   = 8.0   # cm — jarak maksimum titik ke garis sebelum split
-MIN_SEGMENT_PTS   = 6     # Jumlah titik minimum agar segmen dianggap dinding
+N_WALLS           = 3      # Jumlah dinding (3 = segitiga)
 
 # RANSAC per segmen
-RANSAC_ITER       = 60    # Jumlah iterasi RANSAC
-RANSAC_INLIER_THR = 6.0   # cm — jarak titik ke garis agar dianggap inlier
+RANSAC_ITER       = 100   # Jumlah iterasi RANSAC
+RANSAC_INLIER_THR = 8.0   # cm — jarak titik ke garis agar dianggap inlier
+MIN_SEGMENT_PTS   = 8     # Jumlah titik minimum per dinding
 
-# Phantom point
-PHANTOM_DIST_THR  = 8.0   # cm — jarak titik ke wall line → phantom jika > ini
+# NWA threshold
+PHANTOM_DIST_THR  = 10.0  # cm — jika jarak ke dinding TERDEKAT > ini → phantom
+
+# Filter densitas — buang titik terpencil sebelum RANSAC
+DENSITY_RADIUS    = 20.0  # cm — radius pencarian tetangga
+MIN_NEIGHBORS     = 5     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
 
 
 # ──────────────────────────────────────────────────────────────
@@ -72,8 +75,9 @@ def _point_to_line_dist(px, py, x1, y1, x2, y2):
 def _ransac_line(pts):
     """
     Fit garis terbaik dari sekumpulan titik menggunakan RANSAC.
-    Kembalikan (a, b, c) koefisien garis  ax + by + c = 0  (ternormalisasi)
+    Kembalikan (a, b, c) koefisien garis  ax + by + c = 0  (ternormalisasi, c > 0)
     dan mask inlier (boolean array).
+    KONVENSI: c > 0 → normal (a,b) mengarah ke origin (ke dalam ruangan).
     Jika gagal, kembalikan None, None.
     """
     if len(pts) < 2:
@@ -82,7 +86,7 @@ def _ransac_line(pts):
     xs, ys = pts[:, 0], pts[:, 1]
     best_inliers = None
     best_count   = 0
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng()
 
     for _ in range(RANSAC_ITER):
         i, j = rng.choice(len(pts), 2, replace=False)
@@ -113,7 +117,14 @@ def _ransac_line(pts):
     norm_ab = np.hypot(a, b)
     if norm_ab == 0:
         return None, None
-    return (a/norm_ab, b/norm_ab, c/norm_ab), best_inliers
+    a, b, c = a/norm_ab, b/norm_ab, c/norm_ab
+
+    # NORMALISASI PENTING: pastikan c > 0
+    # c > 0 berarti origin berada di sisi positif garis → normal (a,b) mengarah KE DALAM (ke origin)
+    if c < 0:
+        a, b, c = -a, -b, -c
+
+    return (a, b, c), best_inliers
 
 
 def _split_and_merge(pts_idx, points, depth=0):
@@ -145,10 +156,17 @@ def _split_and_merge(pts_idx, points, depth=0):
 
 def _detect_walls_and_phantoms(sx, sy):
     """
-    Utama: terima titik inlier (sx, sy list/array), kembalikan:
-      - wall_seg_data : list of (x1,y1,x2,y2) garis nominal wall
-      - inlier_mask   : boolean array — True jika bukan phantom
-      - phantom_mask  : boolean array — True jika phantom
+    NWA (Nominal Wall Angle) + Sequential RANSAC:
+      0. Pre-filter: titik terpencil (lonely) langsung phantom
+      1. Sequential RANSAC — cari dinding satu per satu
+      2. Pilih N_WALLS terbaik berdasarkan jumlah inlier
+      3. Sort CCW berdasarkan sudut normal, intersect → polygon tertutup (segitiga)
+      4. NWA phantom: jarak ke dinding terdekat > threshold → phantom
+
+    Return:
+      - wall_seg_data : list of (x1,y1,x2,y2)
+      - inlier_mask   : boolean array
+      - phantom_mask  : boolean array
     """
     n = len(sx)
     if n < MIN_SEGMENT_PTS * 2:
@@ -158,38 +176,80 @@ def _detect_walls_and_phantoms(sx, sy):
     sy_np = np.array(sy, dtype=float)
     pts   = np.column_stack([sx_np, sy_np])
 
-    # 1. Urutkan berdasarkan sudut polar
-    angles = np.arctan2(sy_np, sx_np)
-    order  = np.argsort(angles)
-    pts_sorted = pts[order]
+    # ── PRE-FILTER: Buang titik terpencil (lonely point) ──────────────
+    # Titik yang tidak punya cukup tetangga dalam radius → langsung phantom
+    # Mencegah RANSAC "ketarik" ke titik terisolasi/noise
+    from scipy.spatial import cKDTree
+    tree = cKDTree(pts)
+    neighbor_counts = np.array([
+        len(tree.query_ball_point(pts[i], DENSITY_RADIUS)) - 1  # -1 untuk exclude dirinya sendiri
+        for i in range(n)
+    ])
+    is_lonely = neighbor_counts < MIN_NEIGHBORS
 
-    # 2. Split-and-Merge
-    segments = _split_and_merge(list(range(len(pts_sorted))), pts_sorted)
+    # Hanya gunakan titik yang tidak lonely untuk RANSAC
+    dense_pts = pts[~is_lonely]
 
-    # 3. RANSAC per segmen
-    wall_lines    = []   # (a, b, c)
-    wall_seg_data = []   # (x1, y1, x2, y2)
-    for seg_idx in segments:
-        seg_pts = pts_sorted[seg_idx]
-        if len(seg_pts) < 2:
-            continue
-        line, _ = _ransac_line(seg_pts)
+    # ── STEP 1: Sequential RANSAC ────────────────────────────
+    remaining = dense_pts.copy()
+    candidates = []  # list of (inlier_count, line)
+
+    for _ in range(N_WALLS + 3):
+        if len(remaining) < MIN_SEGMENT_PTS:
+            break
+        line, inlier_mask = _ransac_line(remaining)
         if line is None:
-            continue
-        wall_lines.append(line)
-        wall_seg_data.append((seg_pts[0, 0], seg_pts[0, 1],
-                              seg_pts[-1, 0], seg_pts[-1, 1]))
+            break
+        inlier_pts  = remaining[inlier_mask]
+        remaining = remaining[~inlier_mask]
+        if len(inlier_pts) >= MIN_SEGMENT_PTS:
+            candidates.append((len(inlier_pts), line))
 
-    # 4. Phantom detection
-    is_phantom = np.ones(n, bool)
-    for gi in range(n):
-        px, py = sx_np[gi], sy_np[gi]
-        for a, b, c in wall_lines:
-            if abs(a*px + b*py + c) <= PHANTOM_DIST_THR:
-                is_phantom[gi] = False
+    # ── STEP 2: Pilih N_WALLS dinding terbaik ────────────────────────
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    wall_lines = [c[1] for c in candidates[:N_WALLS]]
+
+    # ── STEP 3: Bentuk polygon tertutup ──────────────────────────────
+    wall_seg_data = []
+    N = len(wall_lines)
+
+    if N >= 2:
+        wall_lines.sort(key=lambda L: np.arctan2(L[1], L[0]))
+
+        corners = []
+        valid = True
+        for i in range(N):
+            a1, b1, c1 = wall_lines[i]
+            a2, b2, c2 = wall_lines[(i + 1) % N]
+            det = a1 * b2 - a2 * b1
+            if abs(det) < 1e-9:
+                valid = False
                 break
+            ix = (b1 * c2 - b2 * c1) / det
+            iy = (a2 * c1 - a1 * c2) / det
+            corners.append((ix, iy))
+
+        if valid:
+            for i in range(N):
+                p1 = corners[i]
+                p2 = corners[(i + 1) % N]
+                wall_seg_data.append((p1[0], p1[1], p2[0], p2[1]))
+
+    # ── STEP 4: NWA + Lonely Phantom Detection ─────────────────────
+    # Phantom jika: (a) titik terpencil ATAU (b) jauh dari dinding terdekat
+    is_phantom = is_lonely.copy()
+    if wall_lines:
+        for gi in range(n):
+            if is_phantom[gi]:
+                continue  # sudah phantom karena lonely
+            px, py = sx_np[gi], sy_np[gi]
+            min_dist = min(abs(a * px + b * py + c) for a, b, c in wall_lines)
+            if min_dist > PHANTOM_DIST_THR:
+                is_phantom[gi] = True
 
     return wall_seg_data, ~is_phantom, is_phantom
+
+
 
 class Visualisasi2D:
     def __init__(self):

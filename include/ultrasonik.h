@@ -15,17 +15,14 @@ private:
         // trigger
         digitalWrite(trigPin, LOW);
         delayMicroseconds(2);
-
         digitalWrite(trigPin, HIGH);
         delayMicroseconds(10);
         digitalWrite(trigPin, LOW);
-
         // tunggu echo HIGH
         long start = micros();
         while (digitalRead(echoPin) == LOW) {
             if (micros() - start > 24000) return -1;
         }
-
         long echoStart = micros();
 
         // tunggu echo LOW

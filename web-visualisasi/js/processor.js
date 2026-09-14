@@ -1,23 +1,26 @@
 /**
  * processor.js — Port algoritma Python ke JavaScript
- * Algoritma: EMA, Outlier Filter, Split-and-Merge, RANSAC, Phantom Detection
+ * Algoritma: EMA, Outlier Filter, Sequential RANSAC, NWA (Nominal Wall Angle), Polygon Close
  */
 
 const DEFAULTS = {
-  ema_alpha:       0.25,
-  max_dist:        250.0,
-  min_dist:        2.0,
-  outlier_sigma:   2.0,
-  outlier_window:  10,
-  min_count:       4,
-  split_threshold: 8.0,
-  min_segment_pts: 6,
-  ransac_iter:     60,
-  ransac_inlier_thr: 6.0,
-  phantom_dist_thr:  8.0,
-  num_sensor:      8,
-  sensor_step:     45.0,
-  snapshot_interval: 30,  // ambil snapshot setiap N paket
+  ema_alpha:         0.25,
+  max_dist:          250.0,
+  min_dist:          2.0,
+  outlier_sigma:     2.0,
+  outlier_window:    10,
+  min_count:         4,
+  min_segment_pts:   8,
+  ransac_iter:       120,
+  ransac_inlier_thr: 8.0,
+  phantom_dist_thr:  10.0,  // NWA threshold (cm): titik di luar batas ini = phantom
+  n_walls:           3,     // Jumlah dinding target (3 = segitiga)
+  // Filter densitas — buang titik "terpencil" sebelum RANSAC
+  density_radius:    20.0,  // cm — radius pencarian tetangga
+  min_neighbors:     5,     // minimal tetangga dalam radius → kalau kurang = lonely = phantom
+  num_sensor:        8,
+  sensor_step:       45.0,
+  snapshot_interval: 30,
 };
 
 class SensorProcessor {
@@ -27,10 +30,6 @@ class SensorProcessor {
     this.snapshots = [];
     this.reset();
   }
-
-  // ────────────────────────────────────────────
-  //  STATE MANAGEMENT
-  // ────────────────────────────────────────────
 
   reset() {
     this.stableMap = new Float64Array(360);
@@ -59,10 +58,6 @@ class SensorProcessor {
     this.packetCount = snap.packetCount;
   }
 
-  // ────────────────────────────────────────────
-  //  CSV PARSING
-  // ────────────────────────────────────────────
-
   parseCSV(text) {
     const lines = text.replace(/\r/g, '').trim().split('\n');
     const rows  = [];
@@ -77,69 +72,41 @@ class SensorProcessor {
     return rows;
   }
 
-  /**
-   * Load CSV text: parse → pre-process semua baris → ambil snapshot berkala.
-   * Setelah selesai, state = snapshot terakhir (full data).
-   */
   loadCSV(text) {
     this.rows      = this.parseCSV(text);
     this.snapshots = [];
     this.reset();
-
     const N = this.rows.length;
     const interval = this.p.snapshot_interval;
-
-    // Snapshot awal (row -1, state kosong)
     this.snapshots.push(this._takeSnapshot(-1));
-
     for (let i = 0; i < N; i++) {
       this.processRow(this.rows[i]);
-      if ((i + 1) % interval === 0 || i === N - 1) {
+      if ((i + 1) % interval === 0 || i === N - 1)
         this.snapshots.push(this._takeSnapshot(i));
-      }
     }
   }
 
-  /**
-   * Seek ke rowIndex: cari snapshot terdekat ≤ rowIndex, load, lanjut proses.
-   */
   seekTo(rowIndex) {
     rowIndex = Math.max(0, Math.min(rowIndex, this.rows.length - 1));
-
-    // Cari snapshot terbesar ≤ rowIndex
     let snapIdx = 0;
     for (let i = 0; i < this.snapshots.length; i++) {
       if (this.snapshots[i].rowIndex <= rowIndex) snapIdx = i;
       else break;
     }
-
     this._loadSnapshot(this.snapshots[snapIdx]);
-
-    // Proses sisa baris dari snapshot ke rowIndex
     const start = this.snapshots[snapIdx].rowIndex + 1;
-    for (let i = start; i <= rowIndex; i++) {
-      this.processRow(this.rows[i]);
-    }
+    for (let i = start; i <= rowIndex; i++) this.processRow(this.rows[i]);
   }
-
-  // ────────────────────────────────────────────
-  //  CORE: PROSES SATU BARIS DATA
-  // ────────────────────────────────────────────
 
   processRow(row) {
     this.currentYaw = row.yaw;
     this.packetCount++;
     const p = this.p;
-
     for (let i = 0; i < p.num_sensor; i++) {
       const dist = row.distances[i];
       if (isNaN(dist) || dist < p.min_dist || dist > p.max_dist) continue;
-
-      // Rumus kunci dari Python: physical_deg = (-yaw + i*sensor_step) % 360
       const physDeg = ((-row.yaw + i * p.sensor_step) % 360 + 360) % 360;
       const idx     = Math.floor(physDeg) % 360;
-
-      // Outlier filter (median + sigma)
       const hist = this.histMap[idx];
       if (hist.length >= p.outlier_window) {
         const sorted = hist.slice().sort((a, b) => a - b);
@@ -148,11 +115,8 @@ class SensorProcessor {
         const std    = Math.sqrt(hist.reduce((s, x) => s + (x - mean) ** 2, 0) / hist.length);
         if (std > 0 && Math.abs(dist - med) > p.outlier_sigma * std) continue;
       }
-
       hist.push(dist);
       if (hist.length > p.outlier_window) hist.shift();
-
-      // EMA update
       if (this.stableMap[idx] === 0) {
         this.stableMap[idx] = dist;
       } else {
@@ -161,10 +125,6 @@ class SensorProcessor {
       this.countMap[idx]++;
     }
   }
-
-  // ────────────────────────────────────────────
-  //  BANGUN TITIK DARI STABLE MAP
-  // ────────────────────────────────────────────
 
   getMapPoints() {
     const sx = [], sy = [], rawX = [], rawY = [];
@@ -175,9 +135,7 @@ class SensorProcessor {
         const x   = d * Math.cos(rad);
         const y   = d * Math.sin(rad);
         rawX.push(x); rawY.push(y);
-        if (this.countMap[i] >= this.p.min_count) {
-          sx.push(x); sy.push(y);
-        }
+        if (this.countMap[i] >= this.p.min_count) { sx.push(x); sy.push(y); }
       }
     }
     return { sx, sy, rawX, rawY };
@@ -186,53 +144,20 @@ class SensorProcessor {
   getStats() {
     const filled = 0 | this.stableMap.reduce((s, v) => s + (v > 0 ? 1 : 0), 0);
     const stable = 0 | [...this.countMap].filter(v => v >= this.p.min_count).length;
-    return {
-      filled, stable, total: 360,
-      packets: this.packetCount,
-      yaw: this.currentYaw,
-    };
+    return { filled, stable, total: 360, packets: this.packetCount, yaw: this.currentYaw };
   }
 
-  // ────────────────────────────────────────────
-  //  WALL FITTING & PHANTOM DETECTION
-  // ────────────────────────────────────────────
-
-  _ptLineDist(px, py, x1, y1, x2, y2) {
-    const dx = x2 - x1, dy = y2 - y1;
-    const len2 = dx * dx + dy * dy;
-    if (len2 === 0) return Math.hypot(px - x1, py - y1);
-    const t = ((px - x1) * dx + (py - y1) * dy) / len2;
-    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
-  }
-
-  _splitAndMerge(ptsIdx, points, depth = 0) {
-    const p = this.p;
-    if (ptsIdx.length < 2)
-      return ptsIdx.length >= p.min_segment_pts ? [ptsIdx] : [];
-
-    const seg = ptsIdx.map(i => points[i]);
-    const [x1, y1] = seg[0];
-    const [x2, y2] = seg[seg.length - 1];
-
-    let maxD = 0, maxI = 0;
-    for (let j = 0; j < seg.length; j++) {
-      const d = this._ptLineDist(seg[j][0], seg[j][1], x1, y1, x2, y2);
-      if (d > maxD) { maxD = d; maxI = j; }
-    }
-
-    if (maxD > p.split_threshold && depth < 12) {
-      const left  = this._splitAndMerge(ptsIdx.slice(0, maxI + 1), points, depth + 1);
-      const right = this._splitAndMerge(ptsIdx.slice(maxI),         points, depth + 1);
-      return [...left, ...right];
-    }
-    return ptsIdx.length >= p.min_segment_pts ? [ptsIdx] : [];
-  }
-
+  // ─────────────────────────────────────────────────────
+  //  RANSAC: fit garis terbaik dari sekumpulan titik
+  //  Return: { line:[a,b,c], inlierMask } atau null
+  //  Garis sudah ternormalisasi |(a,b)|=1
+  //  KONVENSI: c > 0  →  normal (a,b) mengarah KE DALAM (ke arah origin)
+  // ─────────────────────────────────────────────────────
   _ransacLine(pts) {
     const p = this.p;
     if (pts.length < 2) return null;
 
-    let bestInliers = null, bestCount = 0;
+    let bestMask = null, bestCount = 0;
 
     for (let iter = 0; iter < p.ransac_iter; iter++) {
       let i = Math.floor(Math.random() * pts.length);
@@ -243,18 +168,17 @@ class SensorProcessor {
       const dx = x2 - x1, dy = y2 - y1;
       if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) continue;
 
-      const a = dy, b = -dx, c = dx * y1 - dy * x1;
-      const norm = Math.hypot(a, b);
-
-      const inliers = pts.map(pp => Math.abs(a * pp[0] + b * pp[1] + c) / norm < p.ransac_inlier_thr);
-      const cnt = inliers.filter(Boolean).length;
-      if (cnt > bestCount) { bestCount = cnt; bestInliers = inliers; }
+      const rawA = dy, rawB = -dx, rawC = dx * y1 - dy * x1;
+      const norm = Math.hypot(rawA, rawB);
+      const mask = pts.map(pp => Math.abs(rawA * pp[0] + rawB * pp[1] + rawC) / norm < p.ransac_inlier_thr);
+      const cnt  = mask.filter(Boolean).length;
+      if (cnt > bestCount) { bestCount = cnt; bestMask = mask; }
     }
 
-    if (!bestInliers || bestCount < 2) return null;
+    if (!bestMask || bestCount < 2) return null;
 
-    // Re-fit dengan inlier via SVD 2×2
-    const inPts = pts.filter((_, i) => bestInliers[i]);
+    // Re-fit via SVD pada inlier
+    const inPts = pts.filter((_, i) => bestMask[i]);
     const cx = inPts.reduce((s, pp) => s + pp[0], 0) / inPts.length;
     const cy = inPts.reduce((s, pp) => s + pp[1], 0) / inPts.length;
     let sxx = 0, sxy = 0, syy = 0;
@@ -271,106 +195,140 @@ class SensorProcessor {
 
     const nAb = Math.hypot(dy2, -dx2);
     if (nAb === 0) return null;
-    const a = dy2 / nAb, b = -dx2 / nAb;
-    const c = -(a * cx + b * cy);
-    return { line: [a, b, c] };
+    let a = dy2 / nAb, b = -dx2 / nAb;
+    let c = -(a * cx + b * cy);
+
+    // Normalisasi: pastikan c > 0 → normal (a,b) menunjuk ke origin (ke dalam ruangan)
+    // Karena|(a,b)|=1, nilai c = jarak origin ke garis dengan tanda.
+    // c > 0 berarti origin di sisi positif = sisi yang ditunjuk normal (a,b)
+    if (c < 0) { a = -a; b = -b; c = -c; }
+
+    return { line: [a, b, c], inlierMask: bestMask, inlierCount: bestCount };
   }
 
-  /**
-   * Deteksi dinding & phantom point dari titik stabil.
-   * @returns { wallSegs, inlierMask, phantomMask }
-   */
+  // ─────────────────────────────────────────────────────
+  //  NWA — Nominal Wall Angle + Sequential RANSAC
+  //  1. Sequential RANSAC → temukan dinding-dinding utama
+  //  2. Pilih N_WALLS dinding terbaik (terbanyak inlier)
+  //  3. Sort berdasarkan sudut normal → urutan CCW
+  //  4. Intersect pasangan bersebelahan → sudut-sudut polygon
+  //  5. Phantom: jarak ke dinding terdekat > threshold
+  // ─────────────────────────────────────────────────────
   detectWalls(sx, sy) {
     const n = sx.length;
     const p = this.p;
+    const N_WALLS = p.n_walls;
 
     if (n < p.min_segment_pts * 2) {
-      return {
-        wallSegs:    [],
-        inlierMask:  new Array(n).fill(true),
-        phantomMask: new Array(n).fill(false),
-      };
+      return { wallSegs: [], inlierMask: new Array(n).fill(true), phantomMask: new Array(n).fill(false) };
     }
 
-    const pts    = sx.map((x, i) => [x, sy[i]]);
-    const angles = pts.map(pp => Math.atan2(pp[1], pp[0]));
-    const order  = angles.map((_, i) => i).sort((a, b) => angles[a] - angles[b]);
-    const sorted = order.map(i => pts[i]);
+    const pts = sx.map((x, i) => [x, sy[i]]);
 
-    const allIdx   = Array.from({ length: sorted.length }, (_, i) => i);
-    const segments = this._splitAndMerge(allIdx, sorted);
+    // ── PRE-FILTER: Buang titik terpencil (lonely point) ───
+    // Titik yang tidak punya cukup tetangga dalam radius → phantom langsung
+    // Ini mencegah RANSAC "ketarik" ke titik terisolasi
+    const R2 = p.density_radius * p.density_radius;
+    const isLonely = new Array(n).fill(false);
+    for (let i = 0; i < n; i++) {
+      let neighborCount = 0;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const dx = pts[i][0] - pts[j][0];
+        const dy = pts[i][1] - pts[j][1];
+        if (dx*dx + dy*dy <= R2) {
+          neighborCount++;
+          if (neighborCount >= p.min_neighbors) break;
+        }
+      }
+      if (neighborCount < p.min_neighbors) isLonely[i] = true;
+    }
 
-    const wallLines = [], wallSegs = [];
-    const segmentsData = [];
-    for (const segIdx of segments) {
-      if (segIdx.length < 2) continue;
-      const segPts = segIdx.map(i => sorted[i]);
-      const res    = this._ransacLine(segPts);
-      if (!res) continue;
+    // Hanya gunakan titik yang tidak lonely untuk RANSAC
+    const densePts = pts.filter((_, i) => !isLonely[i]);
+
+    // ── STEP 1: Sequential RANSAC ──────────────────────────
+    // Cari dinding satu per satu: fit garis terbaik → hapus inliernya → ulangi
+    let remaining = densePts.slice();
+    const candidates = []; // { line, inlierCount }
+
+    for (let iter = 0; iter < N_WALLS + 3; iter++) {
+      if (remaining.length < p.min_segment_pts) break;
+      const res = this._ransacLine(remaining);
+      if (!res) break;
+
       const [a, b, c] = res.line;
-      wallLines.push(res.line);
-      
-      // Proyeksikan titik awal dan akhir ke garis RANSAC agar lurus sempurna
-      const [px1, py1] = segPts[0];
-      const [px2, py2] = segPts[segPts.length - 1];
-      
-      const dist1 = a * px1 + b * py1 + c;
-      const x1 = px1 - a * dist1;
-      const y1 = py1 - b * dist1;
-      
-      const dist2 = a * px2 + b * py2 + c;
-      const x2 = px2 - a * dist2;
-      const y2 = py2 - b * dist2;
-
-      segmentsData.push({
-        line: res.line,
-        p1: [x1, y1],
-        p2: [x2, y2]
-      });
+      const nextRemaining = [];
+      let inlierCnt = 0;
+      for (const pt of remaining) {
+        if (Math.abs(a * pt[0] + b * pt[1] + c) <= p.ransac_inlier_thr) {
+          inlierCnt++;
+        } else {
+          nextRemaining.push(pt);
+        }
+      }
+      if (inlierCnt >= p.min_segment_pts) {
+        candidates.push({ line: res.line, inlierCount: inlierCnt });
+      }
+      remaining = nextRemaining;
     }
 
-    // Sambungkan ujung-ujung segmen yang berdekatan untuk membentuk sudut kotak yang rapi
-    const N_segs = segmentsData.length;
-    if (N_segs > 1) {
-      for (let i = 0; i < N_segs; i++) {
-        const seg1 = segmentsData[i];
-        const seg2 = segmentsData[(i + 1) % N_segs];
-        
-        const [a1, b1, c1] = seg1.line;
-        const [a2, b2, c2] = seg2.line;
-        
+    // ── STEP 2: Pilih N_WALLS dinding terbaik ──────────────
+    candidates.sort((a, b) => b.inlierCount - a.inlierCount);
+    const wallLines = candidates.slice(0, N_WALLS).map(c => c.line);
+
+    const wallSegs = [];
+    const N = wallLines.length;
+
+    // ── STEP 3: Sort berdasarkan sudut normal (CCW) ─────────
+    // Normal (a,b) sudah dijamin mengarah ke dalam (c > 0).
+    // Jika kita sort atan2(b, a) secara ascending, urutan garis akan CCW
+    // sehingga perpotongan garis[i] & garis[i+1] membentuk sudut polygon yang runtut.
+    if (N >= 2) {
+      wallLines.sort((L1, L2) => Math.atan2(L1[1], L1[0]) - Math.atan2(L2[1], L2[0]));
+
+      // ── STEP 4: Hitung corner = perpotongan garis bersebelahan ──
+      // Untuk garis L1: a1x+b1y+c1=0 dan L2: a2x+b2y+c2=0
+      // Solusi: x = (b1*c2 - b2*c1)/det,  y = (a2*c1 - a1*c2)/det
+      // di mana det = a1*b2 - a2*b1
+      const getIntersect = (L1, L2) => {
+        const [a1, b1, c1] = L1, [a2, b2, c2] = L2;
         const det = a1 * b2 - a2 * b1;
-        // Jika garis tidak sejajar (det tidak mendekati 0)
-        if (Math.abs(det) > 0.1) {
-          const ix = (b1 * c2 - b2 * c1) / det;
-          const iy = (a2 * c1 - a1 * c2) / det;
-          
-          // Cek jarak perpotongan dari ujung segmen
-          const distToP2 = Math.hypot(ix - seg1.p2[0], iy - seg1.p2[1]);
-          const distToP1 = Math.hypot(ix - seg2.p1[0], iy - seg2.p1[1]);
-          
-          // Jika perpotongan tidak terlalu jauh, gabungkan (membentuk sudut tajam)
-          if (distToP2 < 80 && distToP1 < 80) {
-            seg1.p2 = [ix, iy];
-            seg2.p1 = [ix, iy];
-          }
+        if (Math.abs(det) < 1e-9) return null;
+        return [(b1 * c2 - b2 * c1) / det, (a2 * c1 - a1 * c2) / det];
+      };
+
+      const corners = [];
+      let valid = true;
+      for (let i = 0; i < N; i++) {
+        const P = getIntersect(wallLines[i], wallLines[(i + 1) % N]);
+        if (!P) { valid = false; break; }
+        corners.push(P);
+      }
+
+      if (valid) {
+        // Segmen polygon: corner[i] → corner[i+1]
+        for (let i = 0; i < N; i++) {
+          wallSegs.push([corners[i][0], corners[i][1], corners[(i+1)%N][0], corners[(i+1)%N][1]]);
         }
       }
     }
 
-    for (const seg of segmentsData) {
-      wallSegs.push([seg.p1[0], seg.p1[1], seg.p2[0], seg.p2[1]]);
-    }
-
-    // Phantom: titik yang jauh dari SEMUA wall line
-    const isPhantom = new Array(n).fill(true);
-    for (let gi = 0; gi < n; gi++) {
-      const px = sx[gi], py = sy[gi];
-      for (const [a, b, c] of wallLines) {
-        if (Math.abs(a * px + b * py + c) <= p.phantom_dist_thr) {
-          isPhantom[gi] = false;
-          break;
+    // ── STEP 5: NWA Phantom Detection ──────────────────────
+    // Titik dinyatakan phantom jika:
+    //   (a) Titik terpencil (lonely) — tidak punya tetangga cukup, ATAU
+    //   (b) Jarak ke dinding terdekat > NWA threshold
+    const isPhantom = isLonely.slice(); // mulai dari hasil lonely filter
+    if (wallLines.length > 0) {
+      for (let gi = 0; gi < n; gi++) {
+        if (isPhantom[gi]) continue; // sudah phantom karena lonely
+        const px = sx[gi], py = sy[gi];
+        let minDist = Infinity;
+        for (const [a, b, c] of wallLines) {
+          const d = Math.abs(a * px + b * py + c);
+          if (d < minDist) minDist = d;
         }
+        if (minDist > p.phantom_dist_thr) isPhantom[gi] = true;
       }
     }
 
