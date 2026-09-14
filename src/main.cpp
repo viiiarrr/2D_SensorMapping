@@ -1,18 +1,19 @@
-#include "ultrasonik.h"
 #include "ServoMotor.h"
 #include "imu.h"
+#include "ultrasonik.h"
 #include <Arduino.h>
-#include <Wire.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <Wire.h>
+#include <math.h>
 
 // =====================
 // KONFIGURASI WIFI & UDP
 // =====================
-const char *ssid      = "rytz";
-const char *password  = "admin12345";
+const char *ssid = "rytz";
+const char *password = "admin12345";
 const char *laptop_ip = "192.168.137.1";
-const int   udp_port  = 5005;
+const int udp_port = 5005;
 WiFiUDP udp;
 
 // =====================
@@ -33,125 +34,136 @@ volatile unsigned long sweepStartTime = 0;
 // =====================
 enum MotorState { DIR_CW, DIR_CCW };
 MotorState currentState = DIR_CW;
-float sweepStartYaw = 0;   // Yaw saat mulai sweep
-#define SWEEP_DEG 720.0    // 2 putaran penuh = 720°
-
-
+float sweepStartYaw = 0; // Yaw saat mulai sweep
+#define SWEEP_DEG 720.0  // 2 putaran penuh = 720°
 
 void IRAM_ATTR homingISR() {
-    if (millis() - sweepStartTime > 500) {
-        sweepStartTime = millis();
-    }
+  if (millis() - sweepStartTime > 500) {
+    sweepStartTime = millis();
+  }
 }
 
 void bacaDanKirim() {
-    imu.update();
-    ultrasonicArray.readAll();
+  imu.update();
+  ultrasonicArray.readAll();
 
-    float currentAngle = imu.getYaw();
+  float currentAngle = imu.getYaw();
 
-    // Format: sudut_platform,jarak1,...,jarak8
-    String out = String(currentAngle, 1) + ",";
-    for (int i = 0; i < NUM_SENSOR; i++) {
-        float d = ultrasonicArray.getDistance(i);
-        if (d == -1.0) d = 0.0;
-        out += String(d, 1);
-        if (i < NUM_SENSOR - 1) out += ",";
-    }
+  // Format: sudut_platform,jarak1,...,jarak8
+  String out = String(currentAngle, 1) + ",";
+  for (int i = 0; i < NUM_SENSOR; i++) {
+    float d = ultrasonicArray.getDistance(i);
+    if (d == -1.0)
+      d = 0.0;
+    out += String(d, 1);
+    if (i < NUM_SENSOR - 1)
+      out += ",";
+  }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        udp.beginPacket(laptop_ip, udp_port);
-        udp.print(out);
-        udp.endPacket();
-    }
+  if (WiFi.status() == WL_CONNECTED) {
+    udp.beginPacket(laptop_ip, udp_port);
+    udp.print(out);
+    udp.endPacket();
+  }
 
-    Serial.print("YAW: "); Serial.print(currentAngle, 2);
-    Serial.print(" deg | "); Serial.println(out);
+  Serial.print("YAW: ");
+  Serial.print(currentAngle, 2);
+  Serial.print(" deg | ");
+  Serial.println(out);
 }
 
 void setup() {
-    Serial.begin(115200);
+  Serial.begin(115200);
 
-    // WiFi
-    Serial.print("Connecting to Wi-Fi");
-    WiFi.begin(ssid, password);
-    int att = 0;
-    while (WiFi.status() != WL_CONNECTED && att < 20) {
-        delay(500); Serial.print("."); att++;
-    }
-    Serial.println(WiFi.status() == WL_CONNECTED
-        ? "\nWi-Fi OK: " + WiFi.localIP().toString()
-        : "\nWi-Fi GAGAL. Lanjut tanpa WiFi...");
+  // WiFi
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(ssid, password);
+  int att = 0;
+  while (WiFi.status() != WL_CONNECTED && att < 20) {
+    delay(500);
+    Serial.print(".");
+    att++;
+  }
+  Serial.println(WiFi.status() == WL_CONNECTED
+                     ? "\nWi-Fi OK: " + WiFi.localIP().toString()
+                     : "\nWi-Fi GAGAL. Lanjut tanpa WiFi...");
 
-    // Sensor ultrasonik
-    ultrasonicArray.begin();
+  // Sensor ultrasonik
+  ultrasonicArray.begin();
 
-    // Homing switch
-    pinMode(HOMING_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(HOMING_PIN), homingISR, FALLING);
+  // Homing switch
+  pinMode(HOMING_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(HOMING_PIN), homingISR, FALLING);
 
-    // IMU
-    imu.begin();
+  // IMU
+  imu.begin();
 
-    // Servo
-    servo.begin();
-    delay(1500);
-    servo.resetAngle();
+  // Servo
+  servo.begin();
+  delay(1500);
+  servo.resetAngle();
 
-    Serial.println("=== MULAI PEMETAAN — SERVO BERPUTAR ===");
-    sweepStartTime = millis();
-    servo.rotateCW();
+  Serial.println("=== MULAI PEMETAAN — SERVO BERPUTAR ===");
+  sweepStartTime = millis();
+  servo.rotateCW();
 }
 
 void loop() {
-    // Update yaw dari IMU
-    imu.update();
-    float currentAngle = imu.getYaw();
+  // Update yaw dari IMU
+  imu.update();
+  float currentAngle = imu.getYaw();
 
-    // Pakai abs agar berlaku untuk CW (yaw negatif) maupun CCW (yaw positif)
-    float yawTraveled = abs(currentAngle - sweepStartYaw);
+  // Pakai abs agar berlaku untuk CW (yaw negatif) maupun CCW (yaw positif)
+  float yawTraveled = abs(currentAngle - sweepStartYaw);
 
-    if (yawTraveled >= SWEEP_DEG) {
-        if (currentState == DIR_CW) {
-            Serial.println(">> 2 Putaran CW selesai — Berbalik ke CCW");
-            servo.stop();
-            delay(500);
-            sweepStartYaw = currentAngle;  // Catat titik awal sweep baru (TIDAK reset yaw)
-            currentState  = DIR_CCW;
-            servo.rotateCCW();
-        } else {
-            Serial.println(">> 2 Putaran CCW selesai — Berbalik ke CW");
-            servo.stop();
-            delay(500);
-            sweepStartYaw = currentAngle;  // Catat titik awal sweep baru (TIDAK reset yaw)
-            currentState  = DIR_CW;
-            servo.rotateCW();
-        }
-        return;
+  if (yawTraveled >= SWEEP_DEG) {
+    if (currentState == DIR_CW) {
+      Serial.println(">> 2 Putaran CW selesai — Berbalik ke CCW");
+      servo.stop();
+      delay(500);
+      sweepStartYaw =
+          currentAngle; // Catat titik awal sweep baru (TIDAK reset yaw)
+      currentState = DIR_CCW;
+      servo.rotateCCW();
+    } else {
+      Serial.println(">> 2 Putaran CCW selesai — Berbalik ke CW");
+      servo.stop();
+      delay(500);
+      sweepStartYaw =
+          currentAngle; // Catat titik awal sweep baru (TIDAK reset yaw)
+      currentState = DIR_CW;
+      servo.rotateCW();
     }
+    return;
+  }
 
-    // Baca sensor & kirim
-    ultrasonicArray.readAll();
+  // Baca sensor & kirim
+  ultrasonicArray.readAll();
 
-    // Format: sudut_platform,jarak1,...,jarak8
-    String out = String(currentAngle, 1) + ",";
-    for (int i = 0; i < NUM_SENSOR; i++) {
-        float d = ultrasonicArray.getDistance(i);
-        if (d == -1.0) d = 0.0;
-        out += String(d, 1);
-        if (i < NUM_SENSOR - 1) out += ",";
-    }
+  // Format: sudut_platform,jarak1,...,jarak8
+  String out = String(currentAngle, 1) + ",";
+  for (int i = 0; i < NUM_SENSOR; i++) {
+    float d = ultrasonicArray.getDistance(i);
+    if (d == -1.0)
+      d = 0.0;
+    out += String(d, 1);
+    if (i < NUM_SENSOR - 1)
+      out += ",";
+  }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        udp.beginPacket(laptop_ip, udp_port);
-        udp.print(out);
-        udp.endPacket();
-    }
+  if (WiFi.status() == WL_CONNECTED) {
+    udp.beginPacket(laptop_ip, udp_port);
+    udp.print(out);
+    udp.endPacket();
+  }
 
-    Serial.print(currentState == DIR_CW ? "[CW] " : "[CCW] ");
-    Serial.print("YAW: "); Serial.print(currentAngle, 1);
-    Serial.print(" | Traveled: "); Serial.print(yawTraveled, 1);
-    Serial.print(" | "); Serial.println(out);
+  Serial.print(currentState == DIR_CW ? "[CW] " : "[CCW] ");
+  Serial.print("YAW: ");
+  Serial.print(currentAngle, 1);
+  Serial.print(" | Traveled: ");
+  Serial.print(yawTraveled, 1);
+  Serial.print(" | ");
+  Serial.println(out);
 
-    delay(20);
+  delay(20);
 }

@@ -164,13 +164,13 @@ async def main():
     webbrowser.open(BROWSER_URL)
 
     # 3. WebSocket server + UDP bridge berjalan bersamaan
-    async with websockets.serve(ws_handler, "localhost", WS_PORT):
+    async with websockets.serve(ws_handler, "0.0.0.0", WS_PORT):
         print()
         print("=" * 52)
         print("  2D SENSOR MAPPER — SERVER AKTIF")
         print("=" * 52)
         print(f"  Web  : {BROWSER_URL}")
-        print(f"  WS   : ws://localhost:{WS_PORT}")
+        print(f"  WS   : ws://0.0.0.0:{WS_PORT}")
         print(f"  UDP  : port {UDP_PORT}  (dari ESP32/Raspberry Pi)")
         print("=" * 52)
         print("  Tekan Ctrl+C untuk menghentikan\n")
