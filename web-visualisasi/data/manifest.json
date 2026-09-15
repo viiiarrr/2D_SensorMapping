@@ -1,6 +1,72 @@
 {
   "experiments": [
     {
+      "id": 67,
+      "name": "Percobaan 67",
+      "file": "percobaan_67/koordinat.csv",
+      "rows": 917
+    },
+    {
+      "id": 66,
+      "name": "Percobaan 66",
+      "file": "percobaan_66/koordinat.csv",
+      "rows": 1433
+    },
+    {
+      "id": 65,
+      "name": "Percobaan 65",
+      "file": "percobaan_65/koordinat.csv",
+      "rows": 2289
+    },
+    {
+      "id": 64,
+      "name": "Percobaan 64",
+      "file": "percobaan_64/koordinat.csv",
+      "rows": 2069
+    },
+    {
+      "id": 63,
+      "name": "Percobaan 63",
+      "file": "percobaan_63/koordinat.csv",
+      "rows": 604
+    },
+    {
+      "id": 62,
+      "name": "Percobaan 62",
+      "file": "percobaan_62/koordinat.csv",
+      "rows": 3963
+    },
+    {
+      "id": 61,
+      "name": "Percobaan 61",
+      "file": "percobaan_61/koordinat.csv",
+      "rows": 1651
+    },
+    {
+      "id": 60,
+      "name": "Percobaan 60",
+      "file": "percobaan_60/koordinat.csv",
+      "rows": 271
+    },
+    {
+      "id": 59,
+      "name": "Percobaan 59",
+      "file": "percobaan_59/koordinat.csv",
+      "rows": 299
+    },
+    {
+      "id": 58,
+      "name": "Percobaan 58",
+      "file": "percobaan_58/koordinat.csv",
+      "rows": 536
+    },
+    {
+      "id": 57,
+      "name": "Percobaan 57",
+      "file": "percobaan_57/koordinat.csv",
+      "rows": 5314
+    },
+    {
       "id": 56,
       "name": "Percobaan 56",
       "file": "percobaan_56/koordinat.csv",

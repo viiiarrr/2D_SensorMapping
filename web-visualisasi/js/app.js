@@ -243,19 +243,28 @@ function renderCurrentState() {
   let phantomCount = 0;
 
   if (sx.length >= proc.p.min_segment_pts * 2) {
-    const { wallSegs, inlierMask, phantomMask } = proc.detectWalls(sx, sy);
-    wallSegCount = wallSegs.length;
+    const { isCircle, circleData, wallSegs, inlierMask, phantomMask, snappedX, snappedY } = proc.detectWalls(sx, sy);
+    wallSegCount = isCircle ? 1 : wallSegs.length;
     phantomCount = phantomMask.filter(Boolean).length;
 
-    inlierX  = sx.filter((_, i) => inlierMask[i]);
-    inlierY  = sy.filter((_, i) => inlierMask[i]);
+    inlierX  = snappedX.filter((_, i) => inlierMask[i]);
+    inlierY  = snappedY.filter((_, i) => inlierMask[i]);
     phantomX = sx.filter((_, i) => phantomMask[i]);
     phantomY = sy.filter((_, i) => phantomMask[i]);
 
-    // Null-separated segments untuk Plotly
-    for (const [x1, y1, x2, y2] of wallSegs) {
-      wallX.push(x1, x2, null);
-      wallY.push(y1, y2, null);
+    if (isCircle) {
+      const { cx, cy, r } = circleData;
+      for (let i = 0; i <= 100; i++) {
+        const theta = (i / 100) * 2 * Math.PI;
+        wallX.push(cx + r * Math.cos(theta));
+        wallY.push(cy + r * Math.sin(theta));
+      }
+    } else {
+      // Null-separated segments untuk Plotly
+      for (const [x1, y1, x2, y2] of wallSegs) {
+        wallX.push(x1, x2, null);
+        wallY.push(y1, y2, null);
+      }
     }
   }
 

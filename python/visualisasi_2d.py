@@ -209,31 +209,29 @@ def _detect_walls_and_phantoms(sx, sy):
     candidates.sort(key=lambda x: x[0], reverse=True)
     wall_lines = [c[1] for c in candidates[:N_WALLS]]
 
-    # ── STEP 3: Bentuk polygon tertutup ──────────────────────────────
+    # ── STEP 3: Batasi garis sesuai dengan titik Inlier ──────────────────
+    # Tidak lagi memaksa polygon tertutup, tapi memotong garis merah tepat di ujung titik inlier.
     wall_seg_data = []
-    N = len(wall_lines)
-
-    if N >= 2:
-        wall_lines.sort(key=lambda L: np.arctan2(L[1], L[0]))
-
-        corners = []
-        valid = True
-        for i in range(N):
-            a1, b1, c1 = wall_lines[i]
-            a2, b2, c2 = wall_lines[(i + 1) % N]
-            det = a1 * b2 - a2 * b1
-            if abs(det) < 1e-9:
-                valid = False
-                break
-            ix = (b1 * c2 - b2 * c1) / det
-            iy = (a2 * c1 - a1 * c2) / det
-            corners.append((ix, iy))
-
-        if valid:
-            for i in range(N):
-                p1 = corners[i]
-                p2 = corners[(i + 1) % N]
-                wall_seg_data.append((p1[0], p1[1], p2[0], p2[1]))
+    
+    for count, line in candidates[:N_WALLS]:
+        a, b, c = line
+        # Cari inliers untuk garis ini (harus di-test ulang karena inlier_mask sudah hilang)
+        t_min = float('inf')
+        t_max = float('-inf')
+        
+        for i in range(len(dense_pts)):
+            px, py = dense_pts[i]
+            if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
+                t = -b * px + a * py
+                if t < t_min: t_min = t
+                if t > t_max: t_max = t
+                
+        if t_min != float('inf') and t_max != float('-inf'):
+            x1 = -b * t_min - a * c
+            y1 =  a * t_min - b * c
+            x2 = -b * t_max - a * c
+            y2 =  a * t_max - b * c
+            wall_seg_data.append((x1, y1, x2, y2))
 
     # ── STEP 4: NWA + Lonely Phantom Detection ─────────────────────
     # Phantom jika: (a) titik terpencil ATAU (b) jauh dari dinding terdekat

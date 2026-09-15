@@ -14,7 +14,7 @@ const DEFAULTS = {
   ransac_iter:       120,
   ransac_inlier_thr: 8.0,
   phantom_dist_thr:  10.0,  // NWA threshold (cm): titik di luar batas ini = phantom
-  n_walls:           4,     // Jumlah dinding maksimal target (4 = persegi)
+  n_walls:           3,     // Jumlah dinding target (3 = segitiga)
   // Filter densitas — buang titik "terpencil" sebelum RANSAC
   density_radius:    20.0,  // cm — radius pencarian tetangga
   min_neighbors:     5,     // minimal tetangga dalam radius → kalau kurang = lonely = phantom
@@ -127,27 +127,6 @@ class SensorProcessor {
   }
 
   getMapPoints() {
-    const p = this.p;
-    
-    // ── SAVITZKY-GOLAY FILTER (1D) ──
-    // Window size 7, Polynomial order 2 atau 3
-    // Coeffs: [-2, 3, 6, 7, 6, 3, -2] / 21
-    const sg = [...this.stableMap];
-    for (let i = 0; i < 360; i++) {
-      if (this.stableMap[i] > 0 && this.countMap[i] >= p.min_count) {
-        let valid = true;
-        let window = [];
-        for (let j = -3; j <= 3; j++) {
-          let idx = (i + j + 360) % 360;
-          if (this.stableMap[idx] === 0) { valid = false; break; }
-          window.push(this.stableMap[idx]);
-        }
-        if (valid) {
-          sg[i] = (-2*window[0] + 3*window[1] + 6*window[2] + 7*window[3] + 6*window[4] + 3*window[5] - 2*window[6]) / 21;
-        }
-      }
-    }
-
     const sx = [], sy = [], rawX = [], rawY = [];
     for (let i = 0; i < 360; i++) {
       const d = this.stableMap[i];
@@ -156,13 +135,7 @@ class SensorProcessor {
         const x   = d * Math.cos(rad);
         const y   = d * Math.sin(rad);
         rawX.push(x); rawY.push(y);
-      }
-    }
-    for (let i = 0; i < 360; i++) {
-      if (this.countMap[i] >= p.min_count && sg[i] > 0) {
-        const rad = i * Math.PI / 180;
-        sx.push(sg[i] * Math.cos(rad));
-        sy.push(sg[i] * Math.sin(rad));
+        if (this.countMap[i] >= this.p.min_count) { sx.push(x); sy.push(y); }
       }
     }
     return { sx, sy, rawX, rawY };
@@ -234,75 +207,6 @@ class SensorProcessor {
   }
 
   // ─────────────────────────────────────────────────────
-  //  RANSAC Circle Fitting & Least Squares Refinement
-  // ─────────────────────────────────────────────────────
-  _fitCircleLS(pts, mask) {
-    const inPts = pts.filter((_, i) => mask[i]);
-    const N = inPts.length;
-    if (N < 3) return null;
-    
-    let sumX = 0, sumY = 0;
-    for (const [x, y] of inPts) { sumX += x; sumY += y; }
-    const cx0 = sumX / N, cy0 = sumY / N;
-    
-    let sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
-    for (const [x, y] of inPts) {
-      const u = x - cx0, v = y - cy0;
-      const z = u*u + v*v;
-      sxx += u*u; syy += v*v; sxy += u*v;
-      sxz += u*z; syz += v*z;
-    }
-    const det = sxx*syy - sxy*sxy;
-    if (Math.abs(det) < 1e-9) return null;
-    
-    const D = (syz * sxy - sxz * syy) / det;
-    const E = (sxz * sxy - syz * sxx) / det;
-    
-    const cx = cx0 - D/2;
-    const cy = cy0 - E/2;
-    let rSum = 0;
-    for (const [x, y] of inPts) rSum += Math.hypot(x - cx, y - cy);
-    return { cx, cy, r: rSum / N };
-  }
-
-  _ransacCircle(pts) {
-    const p = this.p;
-    if (pts.length < 3) return null;
-
-    let bestMask = null, bestCount = 0;
-
-    for (let iter = 0; iter < p.ransac_iter; iter++) {
-      let i = Math.floor(Math.random() * pts.length);
-      let j = Math.floor(Math.random() * (pts.length - 1)); if (j >= i) j++;
-      let k = Math.floor(Math.random() * (pts.length - 2)); if (k >= i) k++; if (k >= j) k++;
-
-      const [x1, y1] = pts[i];
-      const [x2, y2] = pts[j];
-      const [x3, y3] = pts[k];
-
-      const D = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
-      if (Math.abs(D) < 1e-9) continue; // Collinear points
-
-      const cx = ((x1*x1 + y1*y1)*(y2 - y3) + (x2*x2 + y2*y2)*(y3 - y1) + (x3*x3 + y3*y3)*(y1 - y2)) / D;
-      const cy = ((x1*x1 + y1*y1)*(x3 - x2) + (x2*x2 + y2*y2)*(x1 - x3) + (x3*x3 + y3*y3)*(x2 - x1)) / D;
-      const r = Math.hypot(x1 - cx, y1 - cy);
-
-      const mask = pts.map(pp => Math.abs(Math.hypot(pp[0] - cx, pp[1] - cy) - r) < p.ransac_inlier_thr);
-      const cnt = mask.filter(Boolean).length;
-      if (cnt > bestCount) { bestCount = cnt; bestMask = mask; }
-    }
-
-    if (!bestMask || bestCount < 3) return null;
-    const refined = this._fitCircleLS(pts, bestMask);
-    if (!refined) return null;
-    
-    const mask = pts.map(pp => Math.abs(Math.hypot(pp[0] - refined.cx, pp[1] - refined.cy) - refined.r) < p.ransac_inlier_thr);
-    const cnt = mask.filter(Boolean).length;
-    
-    return { circle: refined, inlierMask: mask, inlierCount: cnt };
-  }
-
-  // ─────────────────────────────────────────────────────
   //  NWA — Nominal Wall Angle + Sequential RANSAC
   //  1. Sequential RANSAC → temukan dinding-dinding utama
   //  2. Pilih N_WALLS dinding terbaik (terbanyak inlier)
@@ -316,12 +220,14 @@ class SensorProcessor {
     const N_WALLS = p.n_walls;
 
     if (n < p.min_segment_pts * 2) {
-      return { isCircle: false, wallSegs: [], inlierMask: new Array(n).fill(true), phantomMask: new Array(n).fill(false), snappedX: [...sx], snappedY: [...sy] };
+      return { wallSegs: [], inlierMask: new Array(n).fill(true), phantomMask: new Array(n).fill(false) };
     }
 
     const pts = sx.map((x, i) => [x, sy[i]]);
 
-    // ── ISOLASI TITIK KESEPIAN (Lonely Points) ──
+    // ── PRE-FILTER: Buang titik terpencil (lonely point) ───
+    // Titik yang tidak punya cukup tetangga dalam radius → phantom langsung
+    // Ini mencegah RANSAC "ketarik" ke titik terisolasi
     const R2 = p.density_radius * p.density_radius;
     const isLonely = new Array(n).fill(false);
     for (let i = 0; i < n; i++) {
@@ -338,16 +244,13 @@ class SensorProcessor {
       if (neighborCount < p.min_neighbors) isLonely[i] = true;
     }
 
+    // Hanya gunakan titik yang tidak lonely untuk RANSAC
     const densePts = pts.filter((_, i) => !isLonely[i]);
 
-    // ── OPSI 1: LINGKARAN (CIRCLE RANSAC) ──
-    const circleRes = this._ransacCircle(densePts);
-    let circleScore = circleRes ? circleRes.inlierCount : 0;
-
-    // ── OPSI 2: GARIS LURUS (LINE RANSAC) ──
+    // ── STEP 1: Sequential RANSAC ──────────────────────────
+    // Cari dinding satu per satu: fit garis terbaik → hapus inliernya → ulangi
     let remaining = densePts.slice();
-    const candidates = [];
-    let lineScore = 0;
+    const candidates = []; // { line, inlierCount }
 
     for (let iter = 0; iter < N_WALLS + 3; iter++) {
       if (remaining.length < p.min_segment_pts) break;
@@ -366,116 +269,73 @@ class SensorProcessor {
       }
       if (inlierCnt >= p.min_segment_pts) {
         candidates.push({ line: res.line, inlierCount: inlierCnt });
-        lineScore += inlierCnt;
       }
       remaining = nextRemaining;
     }
 
+    // ── STEP 2: Pilih N_WALLS dinding terbaik ──────────────
     candidates.sort((a, b) => b.inlierCount - a.inlierCount);
     const wallLines = candidates.slice(0, N_WALLS).map(c => c.line);
+    console.log("WALL LINES:", wallLines);
 
-    // ── AUTO-DETECTION: Pilih yang skor inlier-nya lebih tinggi ──
-    // Lingkaran diberi sedikit handicap (1.1x) agar tidak mudah mendeteksi ruangan kotak kecil sebagai lingkaran
-    const isCircle = circleScore > lineScore * 1.05; // Kurangi handicap agar lebih sensitif ke lingkaran
-    console.log(`[Auto-Detect] Circle Score: ${circleScore}, Line Score: ${lineScore} -> Mode: ${isCircle ? 'CIRCLE' : 'LINES'}`);
+    const wallSegs = [];
 
-    const snappedX = [...sx];
-    const snappedY = [...sy];
-    const isPhantom = isLonely.slice(); 
-    
-    if (isCircle) {
-      // ── MODE LINGKARAN ──
-      const { cx, cy, r } = circleRes.circle;
-      const inlierMask = new Array(n).fill(false);
-      
+    const N = wallLines.length;
+
+    // ── STEP 3: Batasi garis sesuai dengan titik Inlier ─────────
+    // Potong garis merah TEPAT di ujung titik-titik inlier-nya.
+    // Gunakan jarak ke garis untuk menentukan inlier (bukan inlierMask yang sudah hilang).
+    for (const { line } of candidates.slice(0, N_WALLS)) {
+      const [a, b, c] = line;
+      // Vektor arah garis: (-b, a)  (tegak lurus terhadap normal (a,b))
+      let tMin = Infinity, tMax = -Infinity;
       for (let i = 0; i < n; i++) {
         if (isLonely[i]) continue;
-        const dCenter = Math.hypot(sx[i] - cx, sy[i] - cy);
-        if (Math.abs(dCenter - r) <= p.ransac_inlier_thr) {
-          inlierMask[i] = true;
-          // Point Snapping ke Lingkaran
-          const angle = Math.atan2(sy[i] - cy, sx[i] - cx);
-          snappedX[i] = cx + r * Math.cos(angle);
-          snappedY[i] = cy + r * Math.sin(angle);
+        // Cek apakah titik ini cukup dekat ke garis ini (= inlier)
+        const dist = Math.abs(a * sx[i] + b * sy[i] + c);
+        if (dist <= p.ransac_inlier_thr) {
+          // Proyeksi titik ke arah garis
+          const t = -b * sx[i] + a * sy[i];
+          if (t < tMin) tMin = t;
+          if (t > tMax) tMax = t;
         }
       }
       
-      // Phantom deteksi untuk lingkaran
-      for (let gi = 0; gi < n; gi++) {
-        if (isPhantom[gi] || inlierMask[gi]) continue;
-        const dCenter = Math.hypot(sx[gi] - cx, sy[gi] - cy);
-        if (Math.abs(dCenter - r) > p.phantom_dist_thr) isPhantom[gi] = true;
+      if (tMin !== Infinity && tMax !== -Infinity) {
+        // Koordinat ujung garis dari parameter t
+        const x1 = -b * tMin - a * c;
+        const y1 =  a * tMin - b * c;
+        const x2 = -b * tMax - a * c;
+        const y2 =  a * tMax - b * c;
+        wallSegs.push([x1, y1, x2, y2]);
       }
-      
-      return {
-        isCircle: true,
-        circleData: { cx, cy, r },
-        wallSegs: [],
-        inlierMask,
-        phantomMask: isPhantom,
-        snappedX,
-        snappedY,
-      };
-      
-    } else {
-      // ── MODE GARIS LURUS ──
-      const wallSegs = [];
-      const inlierOfWall = new Array(n).fill(-1);
-
-      for (let w = 0; w < Math.min(candidates.length, N_WALLS); w++) {
-        const line = candidates[w].line;
-        const [a, b, c] = line;
-        let tMin = Infinity, tMax = -Infinity;
-        
-        for (let i = 0; i < n; i++) {
-          if (isLonely[i]) continue;
-          const dist = Math.abs(a * sx[i] + b * sy[i] + c);
-          if (dist <= p.ransac_inlier_thr) {
-            if (inlierOfWall[i] === -1) inlierOfWall[i] = w;
-            
-            if (inlierOfWall[i] === w) {
-              const t = -b * sx[i] + a * sy[i];
-              if (t < tMin) tMin = t;
-              if (t > tMax) tMax = t;
-              
-              snappedX[i] = -b * t - a * c;
-              snappedY[i] =  a * t - b * c;
-            }
-          }
-        }
-        
-        if (tMin !== Infinity && tMax !== -Infinity) {
-          const x1 = -b * tMin - a * c;
-          const y1 =  a * tMin - b * c;
-          const x2 = -b * tMax - a * c;
-          const y2 =  a * tMax - b * c;
-          wallSegs.push([x1, y1, x2, y2]);
-        }
-      }
-
-      if (wallLines.length > 0) {
-        for (let gi = 0; gi < n; gi++) {
-          if (isPhantom[gi]) continue;
-          if (inlierOfWall[gi] !== -1) continue; 
-          
-          const px = sx[gi], py = sy[gi];
-          let minDist = Infinity;
-          for (const [a, b, c] of wallLines) {
-            const d = Math.abs(a * px + b * py + c);
-            if (d < minDist) minDist = d;
-          }
-          if (minDist > p.phantom_dist_thr) isPhantom[gi] = true;
-        }
-      }
-
-      return {
-        isCircle: false,
-        wallSegs,
-        inlierMask: inlierOfWall.map(w => w !== -1),
-        phantomMask: isPhantom,
-        snappedX,
-        snappedY,
-      };
     }
+
+
+    // ── STEP 4: NWA Phantom Detection ──────────────────────
+    // Titik dinyatakan phantom jika:
+    //   (a) Titik terpencil (lonely) — tidak punya tetangga cukup, ATAU
+    //   (b) Jarak ke dinding terdekat > NWA threshold
+    const isPhantom = isLonely.slice(); // mulai dari hasil lonely filter
+    if (wallLines.length > 0) {
+      for (let gi = 0; gi < n; gi++) {
+        if (isPhantom[gi]) continue; // sudah phantom karena lonely
+        const px = sx[gi], py = sy[gi];
+        let minDist = Infinity;
+        for (const [a, b, c] of wallLines) {
+          const d = Math.abs(a * px + b * py + c);
+          if (d < minDist) minDist = d;
+        }
+        if (minDist > p.phantom_dist_thr) isPhantom[gi] = true;
+      }
+    }
+
+    return {
+      wallSegs,
+      inlierMask:  isPhantom.map(v => !v),
+      phantomMask: isPhantom,
+    };
   }
 }
+
+module.exports = { SensorProcessor };
