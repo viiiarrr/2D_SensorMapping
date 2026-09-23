@@ -383,8 +383,8 @@ class SensorProcessor {
     if (candidates.length > 0) {
       validCandidates.push(candidates[0]);
       for (let i = 1; i < candidates.length; i++) {
-        if (candidates[i].inlierCount < candidates[0].inlierCount * 0.4) {
-          break; // relative drop to largest wall
+        if (candidates[i].inlierCount < candidates[0].inlierCount * 0.25) {
+          break; // relative drop to largest wall (relaxed to 25% to allow distant/sparse walls)
         }
         validCandidates.push(candidates[i]);
       }
@@ -476,7 +476,9 @@ class SensorProcessor {
           const [a1, b1, c1] = stdLines[i];
           const [a2, b2, c2] = stdLines[(i+1)%stdLines.length];
           const det = a1*b2 - a2*b1;
-          if (Math.abs(det) > 1e-6) {
+          // Cek apakah garis hampir sejajar (sudut < 10 derajat). abs(sin(10deg)) ~ 0.17
+          // Jika ya, mereka tidak boleh dipotongkan (mencegah corner di infinity / bentuk X).
+          if (Math.abs(det) > 0.17) {
             corners.push([(b1*c2 - b2*c1)/det, (a2*c1 - a1*c2)/det]);
           } else {
             corners.push(null);

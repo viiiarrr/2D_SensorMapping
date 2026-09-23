@@ -285,7 +285,7 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
     if candidates:
         valid_candidates.append(candidates[0])
         for i in range(1, len(candidates)):
-            if candidates[i][0] < candidates[0][0] * 0.4:
+            if candidates[i][0] < candidates[0][0] * 0.25:
                 break
             valid_candidates.append(candidates[i])
             
@@ -310,7 +310,7 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
             a1, b1, c1, _ = std_lines[i]
             a2, b2, c2, _ = std_lines[(i+1)%len(std_lines)]
             det = a1*b2 - a2*b1
-            if abs(det) > 1e-6:
+            if abs(det) > 0.17:
                 x = (b1*c2 - b2*c1)/det
                 y = (a2*c1 - a1*c2)/det
                 corners.append((x, y))
