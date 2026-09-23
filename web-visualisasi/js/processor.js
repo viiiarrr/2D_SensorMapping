@@ -383,8 +383,8 @@ class SensorProcessor {
     if (candidates.length > 0) {
       validCandidates.push(candidates[0]);
       for (let i = 1; i < candidates.length; i++) {
-        if (candidates[i].inlierCount < candidates[i-1].inlierCount * 0.5) {
-          break; // Huge drop detected, stop accepting new walls
+        if (candidates[i].inlierCount < candidates[0].inlierCount * 0.4) {
+          break; // relative drop to largest wall
         }
         validCandidates.push(candidates[i]);
       }
@@ -459,12 +459,16 @@ class SensorProcessor {
       
     } else {
       // ── MODE GARIS LURUS ──
-      const wallSegs = [];
+      const finalWallSegs = [];
       const inlierOfWall = new Array(n).fill(-1);
 
       let polygonFormed = false;
+      const sortedWallSegsMap = {}; // Map original index to its polygon segment
+      
       if (wallLines.length >= 3) {
-        const stdLines = wallLines.map(([a, b, c]) => c < 0 ? [-a, -b, -c] : [a, b, c]);
+        const stdLines = wallLines.map(([a, b, c], origIdx) => 
+          c < 0 ? [-a, -b, -c, origIdx] : [a, b, c, origIdx]
+        );
         stdLines.sort((L1, L2) => Math.atan2(L1[1], L1[0]) - Math.atan2(L2[1], L2[0]));
         
         const corners = [];
@@ -483,7 +487,8 @@ class SensorProcessor {
           for (let i = 0; i < corners.length; i++) {
             const [x1, y1] = corners[i];
             const [x2, y2] = corners[(i+1)%corners.length];
-            wallSegs.push([x1, y1, x2, y2]);
+            const origIdx = stdLines[i][3];
+            sortedWallSegsMap[origIdx] = [x1, y1, x2, y2];
           }
           polygonFormed = true;
         }
@@ -492,7 +497,7 @@ class SensorProcessor {
       for (let w = 0; w < wallLines.length; w++) {
         const line = wallLines[w];
         const [a, b, c] = line;
-        const seg = polygonFormed ? wallSegs[w] : null;
+        const seg = polygonFormed ? sortedWallSegsMap[w] : null;
         let tMin = Infinity, tMax = -Infinity;
         
         for (let i = 0; i < n; i++) {
@@ -527,12 +532,14 @@ class SensorProcessor {
           }
         }
         
-        if (!polygonFormed && tMin !== Infinity && tMax !== -Infinity) {
+        if (polygonFormed) {
+          finalWallSegs.push(seg);
+        } else if (tMin !== Infinity && tMax !== -Infinity) {
           const x1 = -b * tMin - a * c;
           const y1 =  a * tMin - b * c;
           const x2 = -b * tMax - a * c;
           const y2 =  a * tMax - b * c;
-          wallSegs.push([x1, y1, x2, y2]);
+          finalWallSegs.push([x1, y1, x2, y2]);
         }
       }
 
@@ -541,7 +548,7 @@ class SensorProcessor {
 
       return {
         isCircle: false,
-        wallSegs,
+        wallSegs: finalWallSegs,
         inlierMask: inlierOfWall.map(w => w !== -1),
         phantomMask: isPhantom,
         snappedX,

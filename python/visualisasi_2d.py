@@ -285,30 +285,30 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
     if candidates:
         valid_candidates.append(candidates[0])
         for i in range(1, len(candidates)):
-            if candidates[i][0] < candidates[i-1][0] * 0.5:
+            if candidates[i][0] < candidates[0][0] * 0.4:
                 break
             valid_candidates.append(candidates[i])
             
     wall_lines = [c[1] for c in valid_candidates[:N_WALLS]]
 
-    # 1. Hitung Segment Dinding (Polygon) DULU
-    wall_seg_data = []
+    final_wall_segs = []
     polygon_formed = False
+    sorted_wall_segs_map = {}
     
     if len(wall_lines) >= 3:
         std_lines = []
-        for a, b, c in wall_lines:
+        for orig_idx, (a, b, c) in enumerate(wall_lines):
             if c < 0:
-                std_lines.append((-a, -b, -c))
+                std_lines.append((-a, -b, -c, orig_idx))
             else:
-                std_lines.append((a, b, c))
+                std_lines.append((a, b, c, orig_idx))
         import math
         std_lines.sort(key=lambda l: math.atan2(l[1], l[0]))
         
         corners = []
         for i in range(len(std_lines)):
-            a1, b1, c1 = std_lines[i]
-            a2, b2, c2 = std_lines[(i+1)%len(std_lines)]
+            a1, b1, c1, _ = std_lines[i]
+            a2, b2, c2, _ = std_lines[(i+1)%len(std_lines)]
             det = a1*b2 - a2*b1
             if abs(det) > 1e-6:
                 x = (b1*c2 - b2*c1)/det
@@ -321,12 +321,17 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
             for i in range(len(corners)):
                 x1, y1 = corners[i]
                 x2, y2 = corners[(i+1)%len(corners)]
-                wall_seg_data.append((x1, y1, x2, y2))
+                orig_idx = std_lines[i][3]
+                sorted_wall_segs_map[orig_idx] = (x1, y1, x2, y2)
             polygon_formed = True
 
-    if not polygon_formed:
-        for count, line in valid_candidates[:N_WALLS]:
-            a, b, c = line
+    for w in range(len(wall_lines)):
+        a, b, c = wall_lines[w]
+        seg = sorted_wall_segs_map.get(w) if polygon_formed else None
+        
+        if polygon_formed:
+            final_wall_segs.append(seg)
+        else:
             t_min = float('inf')
             t_max = float('-inf')
             for i in range(len(dense_pts)):
@@ -340,10 +345,14 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
                 y1 =  a * t_min - b * c
                 x2 = -b * t_max - a * c
                 y2 =  a * t_max - b * c
-                wall_seg_data.append((x1, y1, x2, y2))
+                final_wall_segs.append((x1, y1, x2, y2))
+            else:
+                final_wall_segs.append(None)
+                
+    # Filter out any Nones just in case for final drawing
+    wall_seg_data = [s for s in final_wall_segs if s is not None]
 
     # --- Pilih Model Terbaik ---
-    # Hitung Phantom Points untuk Lingkaran
     circle_phantom_count = n
     if circle_model is not None:
         xc, yc, r = circle_model
@@ -351,7 +360,6 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
         circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_phantom_base
         circle_phantom_count = circle_phantom_mask.sum()
         
-    # Hitung Phantom Points untuk Dinding (dengan batas segmen polygon)
     wall_phantom_mask = is_phantom_base.copy()
     if wall_lines:
         for gi in range(n):
@@ -363,8 +371,9 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
             for w in range(len(wall_lines)):
                 a, b, c = wall_lines[w]
                 if abs(a * px + b * py + c) <= PHANTOM_DIST_THR:
-                    if polygon_formed and w < len(wall_seg_data):
-                        x1, y1, x2, y2 = wall_seg_data[w]
+                    seg = sorted_wall_segs_map.get(w) if polygon_formed else None
+                    if seg:
+                        x1, y1, x2, y2 = seg
                         dx, dy = x2 - x1, y2 - y1
                         L2 = dx*dx + dy*dy
                         if L2 > 1e-6:
@@ -384,7 +393,6 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
     elif SHAPE_MODE == 'walls':
         best_shape = 'walls'
     else:
-        # AUTO MODE
         if circle_model is not None and circle_phantom_count <= wall_phantom_count:
             best_shape = 'circle'
         else:
