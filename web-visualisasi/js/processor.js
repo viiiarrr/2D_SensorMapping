@@ -148,7 +148,7 @@ class SensorProcessor {
       }
     }
 
-    const sx = [], sy = [], rawX = [], rawY = [];
+    const sx = [], sy = [], rawX = [], rawY = [], counts = [];
     for (let i = 0; i < 360; i++) {
       const d = this.stableMap[i];
       if (d > 0) {
@@ -156,16 +156,18 @@ class SensorProcessor {
         const x   = d * Math.cos(rad);
         const y   = d * Math.sin(rad);
         rawX.push(x); rawY.push(y);
+        counts.push(this.countMap[i]);
+
+        if (this.countMap[i] >= p.min_count && sg[i] > 0) {
+          sx.push(sg[i] * Math.cos(rad));
+          sy.push(sg[i] * Math.sin(rad));
+        } else {
+          sx.push(x);
+          sy.push(y);
+        }
       }
     }
-    for (let i = 0; i < 360; i++) {
-      if (this.countMap[i] >= p.min_count && sg[i] > 0) {
-        const rad = i * Math.PI / 180;
-        sx.push(sg[i] * Math.cos(rad));
-        sy.push(sg[i] * Math.sin(rad));
-      }
-    }
-    return { sx, sy, rawX, rawY };
+    return { sx, sy, rawX, rawY, counts };
   }
 
   getStats() {
@@ -310,7 +312,7 @@ class SensorProcessor {
   //  4. Intersect pasangan bersebelahan → sudut-sudut polygon
   //  5. Phantom: jarak ke dinding terdekat > threshold
   // ─────────────────────────────────────────────────────
-  detectWalls(sx, sy) {
+  detectWalls(sx, sy, counts) {
     const n = sx.length;
     const p = this.p;
     const N_WALLS = p.n_walls;
@@ -320,6 +322,7 @@ class SensorProcessor {
     }
 
     const pts = sx.map((x, i) => [x, sy[i]]);
+    const isUnstable = counts ? counts.map(c => c < p.min_count) : new Array(n).fill(false);
 
     // ── ISOLASI TITIK KESEPIAN (Lonely Points) ──
     const R2 = p.density_radius * p.density_radius;
@@ -338,7 +341,8 @@ class SensorProcessor {
       if (neighborCount < p.min_neighbors) isLonely[i] = true;
     }
 
-    const densePts = pts.filter((_, i) => !isLonely[i]);
+    const isPhantomBase = isUnstable.map((u, i) => u || isLonely[i]);
+    const densePts = pts.filter((_, i) => !isPhantomBase[i]);
 
     // ── OPSI 1: LINGKARAN (CIRCLE RANSAC) ──
     const circleRes = this._ransacCircle(densePts);
@@ -372,7 +376,20 @@ class SensorProcessor {
     }
 
     candidates.sort((a, b) => b.inlierCount - a.inlierCount);
-    const wallLines = candidates.slice(0, N_WALLS).map(c => c.line);
+    
+    // ── AUTO SHAPE DETECTION: Deteksi otomatis Segitiga vs Persegi ──
+    // Hanya ambil dinding utama. Jika terjadi penurunan drastis inlier antar iterasi, anggap iterasi berikutnya hanya noise.
+    const validCandidates = [];
+    if (candidates.length > 0) {
+      validCandidates.push(candidates[0]);
+      for (let i = 1; i < candidates.length; i++) {
+        if (candidates[i].inlierCount < candidates[i-1].inlierCount * 0.5) {
+          break; // Huge drop detected, stop accepting new walls
+        }
+        validCandidates.push(candidates[i]);
+      }
+    }
+    const wallLines = validCandidates.slice(0, N_WALLS).map(c => c.line);
 
     // ── AUTO-DETECTION: Pilih yang skor inlier-nya lebih tinggi ──
     // Lingkaran diberi sedikit handicap (1.1x) agar tidak mudah mendeteksi ruangan kotak kecil sebagai lingkaran
@@ -401,6 +418,7 @@ class SensorProcessor {
       }
       
       // Phantom deteksi untuk lingkaran
+      const isPhantom = isPhantomBase.slice();
       for (let gi = 0; gi < n; gi++) {
         if (isPhantom[gi] || inlierMask[gi]) continue;
         const dCenter = Math.hypot(sx[gi] - cx, sy[gi] - cy);
@@ -422,8 +440,8 @@ class SensorProcessor {
       const wallSegs = [];
       const inlierOfWall = new Array(n).fill(-1);
 
-      for (let w = 0; w < Math.min(candidates.length, N_WALLS); w++) {
-        const line = candidates[w].line;
+      for (let w = 0; w < Math.min(validCandidates.length, N_WALLS); w++) {
+        const line = validCandidates[w].line;
         const [a, b, c] = line;
         let tMin = Infinity, tMax = -Infinity;
         
@@ -453,6 +471,7 @@ class SensorProcessor {
         }
       }
 
+      const isPhantom = isPhantomBase.slice();
       if (wallLines.length > 0) {
         for (let gi = 0; gi < n; gi++) {
           if (isPhantom[gi]) continue;

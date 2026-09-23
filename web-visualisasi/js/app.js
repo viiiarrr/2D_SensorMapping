@@ -236,7 +236,7 @@ function buildEmptyTraces() {
 function renderCurrentState() {
   if (!plotInitialized) return;
 
-  const { sx, sy, rawX, rawY } = proc.getMapPoints();
+  const { sx, sy, rawX, rawY, counts } = proc.getMapPoints();
   const stats = proc.getStats();
 
   let wallX = [], wallY = [];
@@ -247,7 +247,7 @@ function renderCurrentState() {
   let wallResult = null;
 
   if (sx.length >= proc.p.min_segment_pts * 2) {
-    wallResult = proc.detectWalls(sx, sy);
+    wallResult = proc.detectWalls(sx, sy, counts);
     const { isCircle, circleData, wallSegs, inlierMask, phantomMask, snappedX, snappedY } = wallResult;
     wallSegCount = isCircle ? 1 : wallSegs.length;
     phantomCount = phantomMask.filter(Boolean).length;

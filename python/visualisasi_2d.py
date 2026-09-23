@@ -217,9 +217,9 @@ def _ransac_circle(pts):
     
     return (xc, yc, r), best_inliers
 
-def _detect_best_shape_and_phantoms(sx, sy):
+def _detect_best_shape_and_phantoms(sx, sy, counts):
     """
-    1. Filter titik terpencil.
+    1. Filter titik terpencil & tidak stabil (count < MIN_COUNT).
     2. Coba RANSAC Circle.
     3. Coba Sequential RANSAC Lines (N_WALLS).
     4. Bandingkan inliers. Pilih model terbaik.
@@ -231,6 +231,9 @@ def _detect_best_shape_and_phantoms(sx, sy):
     sx_np = np.array(sx, dtype=float)
     sy_np = np.array(sy, dtype=float)
     pts   = np.column_stack([sx_np, sy_np])
+    counts_np = np.array(counts, dtype=int)
+
+    is_unstable = counts_np < MIN_COUNT
 
     from scipy.spatial import cKDTree
     tree = cKDTree(pts)
@@ -239,10 +242,12 @@ def _detect_best_shape_and_phantoms(sx, sy):
         for i in range(n)
     ])
     is_lonely = neighbor_counts < MIN_NEIGHBORS
-    dense_pts = pts[~is_lonely]
+    
+    is_phantom_base = is_unstable | is_lonely
+    dense_pts = pts[~is_phantom_base]
 
     if len(dense_pts) < MIN_SEGMENT_PTS:
-        return 'none', None, ~is_lonely, is_lonely
+        return 'none', None, ~is_phantom_base, is_phantom_base
 
     # --- Test Lingkaran ---
     circle_model, circle_inlier_mask = _ransac_circle(dense_pts)
@@ -266,7 +271,15 @@ def _detect_best_shape_and_phantoms(sx, sy):
             wall_inlier_count += len(inlier_pts)
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-    wall_lines = [c[1] for c in candidates[:N_WALLS]]
+    valid_candidates = []
+    if candidates:
+        valid_candidates.append(candidates[0])
+        for i in range(1, len(candidates)):
+            if candidates[i][0] < candidates[i-1][0] * 0.5:
+                break
+            valid_candidates.append(candidates[i])
+            
+    wall_lines = [c[1] for c in valid_candidates[:N_WALLS]]
 
     # --- Pilih Model Terbaik ---
     # Hitung Phantom Points untuk Lingkaran
@@ -274,11 +287,11 @@ def _detect_best_shape_and_phantoms(sx, sy):
     if circle_model is not None:
         xc, yc, r = circle_model
         dists_c = np.abs(np.hypot(sx_np - xc, sy_np - yc) - r)
-        circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_lonely
+        circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_phantom_base
         circle_phantom_count = circle_phantom_mask.sum()
         
     # Hitung Phantom Points untuk Dinding
-    wall_phantom_mask = is_lonely.copy()
+    wall_phantom_mask = is_phantom_base.copy()
     if wall_lines:
         for gi in range(n):
             if wall_phantom_mask[gi]:
@@ -306,7 +319,7 @@ def _detect_best_shape_and_phantoms(sx, sy):
         return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
     else:
         wall_seg_data = []
-        for count, line in candidates[:N_WALLS]:
+        for count, line in valid_candidates[:N_WALLS]:
             a, b, c = line
             t_min = float('inf')
             t_max = float('-inf')
@@ -359,15 +372,10 @@ class Visualisasi2D:
             color='#1a6fb5', markersize=5, alpha=0.85,
             label='Titik Dinding (Inlier)', zorder=4)
 
-        # Scatter titik phantom (oranye) — jauh dari garis dinding
+        # Scatter titik phantom (oranye) — jauh dari garis dinding atau tidak stabil
         self.scatter_phantom, = self.ax.plot([], [], 'o',
             color='#f57c00', markersize=5, alpha=0.85,
             label='Phantom Point', zorder=4)
-
-        # Titik mentah (kecil, transparan) – referensi sensor
-        self.boundary, = self.ax.plot([], [], 'o',
-            color='#aaaaaa', markersize=2, alpha=0.4,
-            label='Titik Sensor (Raw)', zorder=2)
 
         # Garis nominal wall (merah)
         self.wall_collection = mc.LineCollection(
@@ -564,8 +572,7 @@ class Visualisasi2D:
 
     def _build_from_map(self):
         """Bangun daftar titik terfilter dari stable_map."""
-        sx, sy       = [], []
-        raw_x, raw_y = [], []
+        sx, sy, counts = [], [], []
 
         for i in range(360):
             d = self.stable_map[i]
@@ -573,13 +580,11 @@ class Visualisasi2D:
                 rad = np.radians(i)
                 x = d * np.cos(rad)
                 y = d * np.sin(rad)
-                raw_x.append(x)
-                raw_y.append(y)
-                if self.count_map[i] >= MIN_COUNT:
-                    sx.append(x)
-                    sy.append(y)
+                sx.append(x)
+                sy.append(y)
+                counts.append(self.count_map[i])
 
-        return sx, sy, raw_x, raw_y
+        return sx, sy, counts
 
     def _update_plot(self, frame):
         # Hentikan update (mencegah jitter RANSAC) jika data CSV sudah selesai / tidak ada paket baru
@@ -601,8 +606,7 @@ class Visualisasi2D:
         if filled == 0:
             return
 
-        sx, sy, raw_x, raw_y = self._build_from_map()
-        self.boundary.set_data(raw_x, raw_y)
+        sx, sy, counts = self._build_from_map()
 
         if len(sx) < MIN_SEGMENT_PTS * 2:
             self.scatter_inlier.set_data(sx, sy)
@@ -615,7 +619,7 @@ class Visualisasi2D:
             sy_np = np.array(sy, dtype=float)
 
             shape_type, shape_data, inlier_mask, phantom_mask = \
-                _detect_best_shape_and_phantoms(sx_np.tolist(), sy_np.tolist())
+                _detect_best_shape_and_phantoms(sx_np.tolist(), sy_np.tolist(), counts)
 
             # Titik inlier (biru)
             self.scatter_inlier.set_data(sx_np[inlier_mask],
