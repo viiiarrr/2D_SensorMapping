@@ -20,6 +20,7 @@ let speedMultiplier = 1;
 let ws = null;
 let isLiveMode = false;
 let lastRenderTime = 0;
+let lastMetrics = null;
 
 /* ============================================================
    INIT
@@ -31,6 +32,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initReplayBar();
   initParamPanel();
   initExportBtn();
+  initQuantPanel();
+  initMetricsExport();
   initPlot();
   initWebSocket();
 });
@@ -241,9 +244,11 @@ function renderCurrentState() {
   let phantomX = [], phantomY = [];
   let wallSegCount = 0;
   let phantomCount = 0;
+  let wallResult = null;
 
   if (sx.length >= proc.p.min_segment_pts * 2) {
-    const { isCircle, circleData, wallSegs, inlierMask, phantomMask, snappedX, snappedY } = proc.detectWalls(sx, sy);
+    wallResult = proc.detectWalls(sx, sy);
+    const { isCircle, circleData, wallSegs, inlierMask, phantomMask, snappedX, snappedY } = wallResult;
     wallSegCount = isCircle ? 1 : wallSegs.length;
     phantomCount = phantomMask.filter(Boolean).length;
 
@@ -307,6 +312,10 @@ function renderCurrentState() {
   el('stat-yaw').textContent     = `${stats.yaw.toFixed(1)}°`;
   el('stat-phantom').textContent = `${phantomCount} (${pct}%)`;
   el('stat-walls').textContent   = wallSegCount;
+
+  // Update quantitative metrics panel
+  const gtType = el('gt-select') ? el('gt-select').value : 'none';
+  updateQuantitativePanel(sx, sy, wallResult, gtType);
 
   showPlot();
 }
@@ -536,6 +545,129 @@ function initExportBtn() {
       filename: `peta_2d_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}`,
     });
   });
+}
+
+/* ============================================================
+   QUANTITATIVE ANALYSIS PANEL
+   ============================================================ */
+function initQuantPanel() {
+  const toggle = document.getElementById('quant-toggle');
+  const body   = document.getElementById('quant-body');
+  toggle.addEventListener('click', () => {
+    body.classList.toggle('collapsed');
+    toggle.classList.toggle('open');
+  });
+
+  const evalToggle = document.getElementById('eval-toggle');
+  const evalBody   = document.getElementById('eval-body');
+  if(evalToggle && evalBody) {
+    evalToggle.addEventListener('click', () => {
+      evalBody.classList.toggle('collapsed');
+      evalToggle.classList.toggle('open');
+    });
+  }
+
+  const gtSelect = document.getElementById('gt-select');
+  if(gtSelect) {
+    gtSelect.addEventListener('change', () => {
+      if (plotInitialized) renderCurrentState();
+    });
+  }
+}
+
+function updateQuantitativePanel(sx, sy, wallResult, gtType = 'none') {
+  const metrics = proc.computeQuantitativeMetrics(sx, sy, wallResult, gtType);
+  lastMetrics = metrics;
+
+  const { shapeAccuracy, mappingQuality, geometry, sensorStability, evalProposal } = metrics;
+
+  // ── Akurasi Bentuk ──
+  setQuantValue('q-rmse', shapeAccuracy.rmse, 'cm',
+    shapeAccuracy.rmse <= 3 ? 'good' : shapeAccuracy.rmse <= 6 ? 'warn' : 'bad');
+  setQuantValue('q-mae', shapeAccuracy.mae, 'cm',
+    shapeAccuracy.mae <= 2.5 ? 'good' : shapeAccuracy.mae <= 5 ? 'warn' : 'bad');
+  setQuantValue('q-maxerr', shapeAccuracy.maxError, 'cm',
+    shapeAccuracy.maxError <= 8 ? 'good' : shapeAccuracy.maxError <= 15 ? 'warn' : 'bad');
+  setQuantValue('q-inlier', shapeAccuracy.inlierRatio, '%',
+    shapeAccuracy.inlierRatio >= 70 ? 'good' : shapeAccuracy.inlierRatio >= 50 ? 'warn' : 'bad');
+
+  // ── Kualitas Pemetaan ──
+  setQuantValue('q-coverage', mappingQuality.coverage, '%',
+    mappingQuality.coverage >= 80 ? 'good' : mappingQuality.coverage >= 50 ? 'warn' : 'bad');
+  setQuantValue('q-stable', mappingQuality.stablePercent, '%',
+    mappingQuality.stablePercent >= 80 ? 'good' : mappingQuality.stablePercent >= 50 ? 'warn' : 'bad');
+  setQuantValue('q-phantom', mappingQuality.phantomRate, '%',
+    mappingQuality.phantomRate <= 10 ? 'good' : mappingQuality.phantomRate <= 25 ? 'warn' : 'bad');
+  setQuantValue('q-density', mappingQuality.avgDensity, '');
+
+  // ── Geometri ──
+  el('q-type').textContent = geometry.type;
+  el('q-dims').textContent = geometry.dimensions;
+  setQuantValue('q-area', geometry.area > 0 ? geometry.area.toLocaleString() : '—', '');
+  setQuantValue('q-perim', geometry.perimeter > 0 ? geometry.perimeter : '—', '');
+
+  // ── Stabilitas Sensor ──
+  setQuantValue('q-stddev', sensorStability.avgStdDev, 'cm',
+    sensorStability.avgStdDev <= 3 ? 'good' : sensorStability.avgStdDev <= 8 ? 'warn' : 'bad');
+  setQuantValue('q-convergence', sensorStability.convergenceScore, '%',
+    sensorStability.convergenceScore >= 70 ? 'good' : sensorStability.convergenceScore >= 40 ? 'warn' : 'bad');
+
+  // ── Evaluasi Proposal ──
+  if (evalProposal) {
+    setQuantValue('ev-error', evalProposal.errorJarak > 0 ? evalProposal.errorJarak.toFixed(1) : '—', '%');
+    setQuantValue('ev-nwa', evalProposal.nwaSuccess > 0 ? evalProposal.nwaSuccess.toFixed(1) : (gtType !== 'none' ? '0.0' : '—'), '%');
+    setQuantValue('ev-dim', evalProposal.errorDimensi > 0 ? evalProposal.errorDimensi.toFixed(1) : '—', '%');
+  }
+
+  // Enable export button
+  el('btn-export-metrics').disabled = false;
+}
+
+function setQuantValue(id, value, unit, colorClass) {
+  const elem = el(id);
+  if (!elem) return;
+  elem.textContent = typeof value === 'number' ? value : value;
+  // Remove old color classes
+  elem.classList.remove('good', 'warn', 'bad');
+  if (colorClass) elem.classList.add(colorClass);
+}
+
+function initMetricsExport() {
+  document.getElementById('btn-export-metrics').addEventListener('click', exportMetricsCSV);
+}
+
+function exportMetricsCSV() {
+  if (!lastMetrics) return;
+  const m = lastMetrics;
+  const rows = [
+    ['Kategori', 'Metrik', 'Nilai', 'Satuan'],
+    ['Akurasi Bentuk', 'RMSE', m.shapeAccuracy.rmse, 'cm'],
+    ['Akurasi Bentuk', 'MAE', m.shapeAccuracy.mae, 'cm'],
+    ['Akurasi Bentuk', 'Max Error', m.shapeAccuracy.maxError, 'cm'],
+    ['Akurasi Bentuk', 'Inlier Ratio', m.shapeAccuracy.inlierRatio, '%'],
+    ['Kualitas Pemetaan', 'Coverage', m.mappingQuality.coverage, '%'],
+    ['Kualitas Pemetaan', 'Stable Points', m.mappingQuality.stablePercent, '%'],
+    ['Kualitas Pemetaan', 'Phantom Rate', m.mappingQuality.phantomRate, '%'],
+    ['Kualitas Pemetaan', 'Avg Density', m.mappingQuality.avgDensity, 'sampel/sudut'],
+    ['Geometri', 'Tipe Bentuk', m.geometry.type, ''],
+    ['Geometri', 'Dimensi', m.geometry.dimensions, ''],
+    ['Geometri', 'Luas', m.geometry.area, 'cm²'],
+    ['Geometri', 'Keliling', m.geometry.perimeter, 'cm'],
+    ['Stabilitas Sensor', 'Avg StdDev', m.sensorStability.avgStdDev, 'cm'],
+    ['Stabilitas Sensor', 'Convergence Score', m.sensorStability.convergenceScore, '%'],
+    ['Evaluasi Proposal', 'Error Jarak Titik', m.evalProposal ? m.evalProposal.errorJarak : 0, '%'],
+    ['Evaluasi Proposal', 'NWA Success Rate', m.evalProposal ? m.evalProposal.nwaSuccess : 0, '%'],
+    ['Evaluasi Proposal', 'Error Dimensi (Keliling)', m.evalProposal ? m.evalProposal.errorDimensi : 0, '%'],
+  ];
+
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `metrik_kuantitatif_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ============================================================

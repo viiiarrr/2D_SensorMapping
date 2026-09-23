@@ -147,6 +147,171 @@
           </div>
         </div>
 
+        <!-- EVALUASI PROPOSAL -->
+        <div class="sidebar-section">
+          <div class="section-header collapsible open" id="eval-toggle">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 11l3 3L22 4"/>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+            </svg>
+            Evaluasi Proposal
+            <svg class="chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div class="quant-body" id="eval-body">
+            
+            <div class="field-group" style="margin-bottom: 12px;">
+              <label class="field-label">Pilih Ground Truth (Bentuk Asli)</label>
+              <select id="gt-select" class="select-field">
+                <option value="none">— Tidak Ada —</option>
+                <option value="rect">Persegi Panjang (150 x 90 cm)</option>
+                <option value="square">Persegi (120 x 120 cm)</option>
+                <option value="triangle">Segitiga Sama Sisi (sisi 120 cm)</option>
+                <option value="circle">Lingkaran (jari-jari 50 cm)</option>
+              </select>
+            </div>
+
+            <div class="quant-grid">
+              <div class="quant-card" style="grid-column: span 2;">
+                <div class="quant-value" id="ev-error">—</div>
+                <div class="quant-label">Error Jarak Titik <span class="quant-unit">%</span></div>
+              </div>
+              <div class="quant-card">
+                <div class="quant-value" id="ev-nwa">—</div>
+                <div class="quant-label">NWA Success <span class="quant-unit">%</span></div>
+              </div>
+              <div class="quant-card">
+                <div class="quant-value" id="ev-dim">—</div>
+                <div class="quant-label">Error Dimensi <span class="quant-unit">%</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ANALISIS KUANTITATIF -->
+        <div class="sidebar-section">
+          <div class="section-header collapsible open" id="quant-toggle">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/>
+              <path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/>
+              <path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>
+            </svg>
+            Analisis Kuantitatif
+            <svg class="chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+          <div class="quant-body" id="quant-body">
+
+            <!-- Akurasi Bentuk -->
+            <div class="quant-category">
+              <div class="quant-cat-label">
+                <span class="quant-cat-dot accuracy"></span>
+                Akurasi Bentuk
+              </div>
+              <div class="quant-grid">
+                <div class="quant-card">
+                  <div class="quant-value" id="q-rmse">—</div>
+                  <div class="quant-label">RMSE <span class="quant-unit">cm</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-mae">—</div>
+                  <div class="quant-label">MAE <span class="quant-unit">cm</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-maxerr">—</div>
+                  <div class="quant-label">Max Error <span class="quant-unit">cm</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-inlier">—</div>
+                  <div class="quant-label">Inlier Ratio <span class="quant-unit">%</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Kualitas Pemetaan -->
+            <div class="quant-category">
+              <div class="quant-cat-label">
+                <span class="quant-cat-dot quality"></span>
+                Kualitas Pemetaan
+              </div>
+              <div class="quant-grid">
+                <div class="quant-card">
+                  <div class="quant-value" id="q-coverage">—</div>
+                  <div class="quant-label">Coverage <span class="quant-unit">%</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-stable">—</div>
+                  <div class="quant-label">Stable <span class="quant-unit">%</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-phantom">—</div>
+                  <div class="quant-label">Phantom <span class="quant-unit">%</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-density">—</div>
+                  <div class="quant-label">Densitas <span class="quant-unit">avg</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Geometri Terdeteksi -->
+            <div class="quant-category">
+              <div class="quant-cat-label">
+                <span class="quant-cat-dot geometry"></span>
+                Geometri Terdeteksi
+              </div>
+              <div class="quant-grid">
+                <div class="quant-card" style="grid-column: span 2;">
+                  <div class="quant-value quant-text" id="q-type">—</div>
+                  <div class="quant-label">Tipe Bentuk</div>
+                </div>
+                <div class="quant-card" style="grid-column: span 2;">
+                  <div class="quant-value quant-text" id="q-dims">—</div>
+                  <div class="quant-label">Dimensi Sisi</div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-area">—</div>
+                  <div class="quant-label">Luas <span class="quant-unit">cm²</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-perim">—</div>
+                  <div class="quant-label">Keliling <span class="quant-unit">cm</span></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Stabilitas Sensor -->
+            <div class="quant-category">
+              <div class="quant-cat-label">
+                <span class="quant-cat-dot stability"></span>
+                Stabilitas Sensor
+              </div>
+              <div class="quant-grid">
+                <div class="quant-card">
+                  <div class="quant-value" id="q-stddev">—</div>
+                  <div class="quant-label">Avg StdDev <span class="quant-unit">cm</span></div>
+                </div>
+                <div class="quant-card">
+                  <div class="quant-value" id="q-convergence">—</div>
+                  <div class="quant-label">Konvergensi <span class="quant-unit">%</span></div>
+                </div>
+              </div>
+            </div>
+
+            <button class="btn-export-metrics" id="btn-export-metrics" disabled>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Export Metrik CSV
+            </button>
+          </div>
+        </div>
+
+
         <!-- PARAMETER -->
         <div class="sidebar-section">
           <div class="section-header collapsible" id="params-toggle">

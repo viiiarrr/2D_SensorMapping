@@ -478,4 +478,323 @@ class SensorProcessor {
       };
     }
   }
+
+  // ─────────────────────────────────────────────────────
+  //  EVALUASI PROPOSAL
+  //  Menghitung Error Jarak, NWA Success, dan Simpangan Dimensi berdasarkan Ground Truth
+  // ─────────────────────────────────────────────────────
+  evaluateProposalMetrics(sx, sy, wallResult, gtType) {
+    const p = this.p;
+    const n = sx.length;
+    let evalMetrics = { errorJarak: 0, nwaSuccess: 0, errorDimensi: 0 };
+    
+    if (n === 0 || !wallResult || gtType === 'none') return evalMetrics;
+
+    const { isCircle, circleData, wallSegs, inlierMask, phantomMask } = wallResult;
+
+    // 1. Tentukan Ground Truth ideal
+    let gtPerimeter = 0;
+    let getIdealDist = (angleRad) => 0;
+
+    if (gtType === 'rect') {
+      gtPerimeter = 2 * (150 + 90);
+      getIdealDist = (a) => {
+        let aw = 150 / 2;
+        let ah = 90 / 2;
+        let c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
+        if (c === 0) return ah;
+        if (s === 0) return aw;
+        return Math.min(aw / c, ah / s);
+      };
+    } else if (gtType === 'square') {
+      gtPerimeter = 4 * 120;
+      getIdealDist = (a) => {
+        let h = 120 / 2;
+        let c = Math.abs(Math.cos(a)), s = Math.abs(Math.sin(a));
+        if (c === 0) return h;
+        if (s === 0) return h;
+        return Math.min(h / c, h / s);
+      };
+    } else if (gtType === 'triangle') {
+      gtPerimeter = 3 * 120;
+      const r_in = 120 / (2 * Math.sqrt(3)); // ~34.641
+      getIdealDist = (a) => {
+        let deg = (a * 180 / Math.PI + 360) % 360;
+        let t = ((deg % 120) - 60) * Math.PI / 180;
+        return r_in / Math.cos(t);
+      };
+    } else if (gtType === 'circle') {
+      gtPerimeter = 2 * Math.PI * 50;
+      getIdealDist = (a) => 50;
+    }
+
+    // 2. Hitung Error Jarak (Khusus untuk inlier)
+    let sumError = 0;
+    let countInlier = 0;
+    for (let i = 0; i < n; i++) {
+      if (inlierMask[i]) {
+        let ptDist = Math.hypot(sx[i], sy[i]);
+        let angle = Math.atan2(sy[i], sx[i]);
+        let idealDist = getIdealDist(angle);
+        
+        let errPct = Math.abs(ptDist - idealDist) / idealDist;
+        sumError += errPct;
+        countInlier++;
+      }
+    }
+    evalMetrics.errorJarak = countInlier > 0 ? (sumError / countInlier) * 100 : 0;
+
+    // 3. Hitung NWA Success Rate (Recall dari Phantom Point Sebenarnya)
+    let truePhantomCount = 0;
+    let removedTruePhantomCount = 0;
+    
+    for (let i = 0; i < n; i++) {
+      let ptDist = Math.hypot(sx[i], sy[i]);
+      let angle = Math.atan2(sy[i], sx[i]);
+      let idealDist = getIdealDist(angle);
+      
+      if (Math.abs(ptDist - idealDist) > p.phantom_dist_thr) {
+        truePhantomCount++;
+        if (phantomMask[i]) {
+          removedTruePhantomCount++;
+        }
+      }
+    }
+    
+    if (truePhantomCount > 0) {
+      evalMetrics.nwaSuccess = (removedTruePhantomCount / truePhantomCount) * 100;
+    } else {
+      evalMetrics.nwaSuccess = 100;
+    }
+
+    // 4. Hitung Error Dimensi (Menggunakan Keliling sebagai representasi linier)
+    let detectPerim = 0;
+    if (isCircle && circleData) {
+      detectPerim = 2 * Math.PI * circleData.r;
+    } else if (wallSegs && wallSegs.length > 0) {
+      for (const [x1, y1, x2, y2] of wallSegs) {
+        detectPerim += Math.hypot(x2 - x1, y2 - y1);
+      }
+    }
+    
+    if (gtPerimeter > 0 && detectPerim > 0) {
+      evalMetrics.errorDimensi = Math.abs(detectPerim - gtPerimeter) / gtPerimeter * 100;
+    } else {
+      evalMetrics.errorDimensi = 0;
+    }
+
+    return evalMetrics;
+  }
+
+  // ─────────────────────────────────────────────────────
+  //  METRIK KUANTITATIF
+  //  Menghitung RMSE, MAE, Max Error, Coverage, Luas, Keliling, dll.
+  // ─────────────────────────────────────────────────────
+  computeQuantitativeMetrics(sx, sy, wallResult, gtType = 'none') {
+    const p = this.p;
+    const n = sx.length;
+
+    // ── Default kosong ──
+    const empty = {
+      shapeAccuracy: { rmse: 0, mae: 0, maxError: 0, inlierRatio: 0 },
+      mappingQuality: { coverage: 0, stablePercent: 0, phantomRate: 0, avgDensity: 0 },
+      geometry: { type: '—', dimensions: '—', area: 0, perimeter: 0 },
+      sensorStability: { avgStdDev: 0, convergenceScore: 0 },
+    };
+
+    if (n === 0 || !wallResult) return empty;
+
+    const { isCircle, circleData, wallSegs, inlierMask, phantomMask, snappedX, snappedY } = wallResult;
+
+    // ════════════════════════════════════════
+    // 1. AKURASI BENTUK (Shape Accuracy)
+    // ════════════════════════════════════════
+    const errors = [];
+    for (let i = 0; i < n; i++) {
+      if (!inlierMask[i]) continue;
+      if (isCircle && circleData) {
+        // Jarak titik asli ke lingkaran fitting
+        const dCenter = Math.hypot(sx[i] - circleData.cx, sy[i] - circleData.cy);
+        errors.push(Math.abs(dCenter - circleData.r));
+      } else if (wallSegs && wallSegs.length > 0) {
+        // Jarak titik asli ke garis dinding terdekat
+        let minDist = Infinity;
+        for (const [x1, y1, x2, y2] of wallSegs) {
+          const d = this._pointToSegmentDist(sx[i], sy[i], x1, y1, x2, y2);
+          if (d < minDist) minDist = d;
+        }
+        errors.push(minDist);
+      }
+    }
+
+    let rmse = 0, mae = 0, maxError = 0;
+    if (errors.length > 0) {
+      const sumSq = errors.reduce((s, e) => s + e * e, 0);
+      rmse = Math.sqrt(sumSq / errors.length);
+      mae = errors.reduce((s, e) => s + e, 0) / errors.length;
+      maxError = Math.max(...errors);
+    }
+
+    const inlierCount = inlierMask.filter(Boolean).length;
+    const inlierRatio = n > 0 ? (inlierCount / n) * 100 : 0;
+
+    // ════════════════════════════════════════
+    // 2. KUALITAS PEMETAAN (Mapping Quality)
+    // ════════════════════════════════════════
+    const filled = [...this.stableMap].filter(v => v > 0).length;
+    const stable = [...this.countMap].filter(v => v >= p.min_count).length;
+    const coverage = (filled / 360) * 100;
+    const stablePercent = filled > 0 ? (stable / filled) * 100 : 0;
+    const phantomCount = phantomMask.filter(Boolean).length;
+    const phantomRate = n > 0 ? (phantomCount / n) * 100 : 0;
+
+    // Densitas: rata-rata jumlah pengukuran per sudut yang terisi
+    let totalCounts = 0, filledAngles = 0;
+    for (let i = 0; i < 360; i++) {
+      if (this.countMap[i] > 0) {
+        totalCounts += this.countMap[i];
+        filledAngles++;
+      }
+    }
+    const avgDensity = filledAngles > 0 ? totalCounts / filledAngles : 0;
+
+    // ════════════════════════════════════════
+    // 3. GEOMETRI TERDETEKSI
+    // ════════════════════════════════════════
+    let type = '—', dimensions = '—', area = 0, perimeter = 0;
+
+    if (isCircle && circleData) {
+      type = 'Lingkaran';
+      const r = circleData.r;
+      dimensions = `R = ${r.toFixed(1)} cm`;
+      area = Math.PI * r * r;
+      perimeter = 2 * Math.PI * r;
+    } else if (wallSegs && wallSegs.length > 0) {
+      const nWalls = wallSegs.length;
+      if (nWalls === 3) type = 'Segitiga';
+      else if (nWalls === 4) type = 'Persegi/Persegi Panjang';
+      else if (nWalls === 5) type = 'Pentagon';
+      else if (nWalls === 6) type = 'Heksagon';
+      else type = `Polygon (${nWalls} sisi)`;
+
+      // Hitung panjang tiap sisi
+      const sideLengths = [];
+      for (const [x1, y1, x2, y2] of wallSegs) {
+        sideLengths.push(Math.hypot(x2 - x1, y2 - y1));
+      }
+      perimeter = sideLengths.reduce((s, l) => s + l, 0);
+
+      if (sideLengths.length > 0) {
+        const avgSide = perimeter / sideLengths.length;
+        const minSide = Math.min(...sideLengths);
+        const maxSide = Math.max(...sideLengths);
+        if (sideLengths.length === 1) {
+          dimensions = `${sideLengths[0].toFixed(1)} cm`;
+        } else {
+          dimensions = `${minSide.toFixed(1)}–${maxSide.toFixed(1)} cm`;
+        }
+      }
+
+      // Luas menggunakan Shoelace formula dari interseksi wall segments
+      area = this._computePolygonArea(wallSegs);
+    }
+
+    // ════════════════════════════════════════
+    // 4. STABILITAS SENSOR
+    // ════════════════════════════════════════
+    let stdDevSum = 0, stdDevCount = 0;
+    for (let i = 0; i < 360; i++) {
+      const hist = this.histMap[i];
+      if (hist.length >= 3) {
+        const mean = hist.reduce((s, x) => s + x, 0) / hist.length;
+        const variance = hist.reduce((s, x) => s + (x - mean) ** 2, 0) / hist.length;
+        stdDevSum += Math.sqrt(variance);
+        stdDevCount++;
+      }
+    }
+    const avgStdDev = stdDevCount > 0 ? stdDevSum / stdDevCount : 0;
+
+    // Convergence Score: 100% = sempurna stabil (std dev = 0), menurun seiring std dev naik
+    // Menggunakan formula: score = 100 * exp(-avgStdDev / 10)
+    const convergenceScore = 100 * Math.exp(-avgStdDev / 10);
+
+    // Hitung Metrik Evaluasi Proposal
+    const evalProposal = this.evaluateProposalMetrics(sx, sy, wallResult, gtType);
+
+    return {
+      shapeAccuracy: {
+        rmse: Math.round(rmse * 100) / 100,
+        mae: Math.round(mae * 100) / 100,
+        maxError: Math.round(maxError * 100) / 100,
+        inlierRatio: Math.round(inlierRatio * 10) / 10,
+      },
+      mappingQuality: {
+        coverage: Math.round(coverage * 10) / 10,
+        stablePercent: Math.round(stablePercent * 10) / 10,
+        phantomRate: Math.round(phantomRate * 10) / 10,
+        avgDensity: Math.round(avgDensity * 10) / 10,
+      },
+      geometry: { type, dimensions, area: Math.round(area), perimeter: Math.round(perimeter * 10) / 10 },
+      sensorStability: {
+        avgStdDev: Math.round(avgStdDev * 100) / 100,
+        convergenceScore: Math.round(convergenceScore * 10) / 10,
+      },
+      evalProposal: {
+        errorJarak: Math.round(evalProposal.errorJarak * 100) / 100,
+        nwaSuccess: Math.round(evalProposal.nwaSuccess * 100) / 100,
+        errorDimensi: Math.round(evalProposal.errorDimensi * 100) / 100,
+      },
+    };
+  }
+
+  // Helper: jarak titik ke segmen garis
+  _pointToSegmentDist(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) return Math.hypot(px - x1, py - y1);
+    let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  }
+
+  // Helper: luas polygon dari wall segments menggunakan Shoelace
+  _computePolygonArea(wallSegs) {
+    if (wallSegs.length < 3) return 0;
+
+    // Kumpulkan semua endpoint dan hitung centroid
+    const pts = [];
+    for (const [x1, y1, x2, y2] of wallSegs) {
+      pts.push([(x1 + x2) / 2, (y1 + y2) / 2]); // midpoint tiap segment
+    }
+
+    // Sort berdasarkan sudut dari centroid
+    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    pts.sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+
+    // Gunakan semua endpoint segment, sorted by angle
+    const allPts = [];
+    for (const [x1, y1, x2, y2] of wallSegs) {
+      allPts.push([x1, y1]);
+      allPts.push([x2, y2]);
+    }
+    allPts.sort((a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+
+    // Hapus duplikat yang berdekatan (jarak < 1cm)
+    const unique = [allPts[0]];
+    for (let i = 1; i < allPts.length; i++) {
+      const d = Math.hypot(allPts[i][0] - unique[unique.length - 1][0], allPts[i][1] - unique[unique.length - 1][1]);
+      if (d > 1) unique.push(allPts[i]);
+    }
+
+    // Shoelace formula
+    let area = 0;
+    const m = unique.length;
+    for (let i = 0; i < m; i++) {
+      const j = (i + 1) % m;
+      area += unique[i][0] * unique[j][1];
+      area -= unique[j][0] * unique[i][1];
+    }
+    return Math.abs(area) / 2;
+  }
 }

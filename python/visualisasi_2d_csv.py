@@ -60,7 +60,7 @@ MIN_NEIGHBORS     = 5     # minimal tetangga dalam radius → kurang dari ini = 
 # =====================
 # KONFIGURASI CSV
 # =====================
-CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_46\koordinat.csv"
+CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_67\koordinat.csv"
 
 # 47 46 persegi
 # 63 64 bulat
