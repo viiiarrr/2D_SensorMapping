@@ -467,8 +467,35 @@ class SensorProcessor {
       const wallSegs = [];
       const inlierOfWall = new Array(n).fill(-1);
 
-      for (let w = 0; w < Math.min(validCandidates.length, N_WALLS); w++) {
-        const line = validCandidates[w].line;
+      let polygonFormed = false;
+      if (wallLines.length >= 3) {
+        const stdLines = wallLines.map(([a, b, c]) => c < 0 ? [-a, -b, -c] : [a, b, c]);
+        stdLines.sort((L1, L2) => Math.atan2(L1[1], L1[0]) - Math.atan2(L2[1], L2[0]));
+        
+        const corners = [];
+        for (let i = 0; i < stdLines.length; i++) {
+          const [a1, b1, c1] = stdLines[i];
+          const [a2, b2, c2] = stdLines[(i+1)%stdLines.length];
+          const det = a1*b2 - a2*b1;
+          if (Math.abs(det) > 1e-6) {
+            corners.push([(b1*c2 - b2*c1)/det, (a2*c1 - a1*c2)/det]);
+          } else {
+            corners.push(null);
+          }
+        }
+        
+        if (corners.every(c => c !== null)) {
+          for (let i = 0; i < corners.length; i++) {
+            const [x1, y1] = corners[i];
+            const [x2, y2] = corners[(i+1)%corners.length];
+            wallSegs.push([x1, y1, x2, y2]);
+          }
+          polygonFormed = true;
+        }
+      }
+
+      for (let w = 0; w < wallLines.length; w++) {
+        const line = wallLines[w];
         const [a, b, c] = line;
         let tMin = Infinity, tMax = -Infinity;
         
@@ -489,7 +516,7 @@ class SensorProcessor {
           }
         }
         
-        if (tMin !== Infinity && tMax !== -Infinity) {
+        if (!polygonFormed && tMin !== Infinity && tMax !== -Infinity) {
           const x1 = -b * tMin - a * c;
           const y1 =  a * tMin - b * c;
           const x2 = -b * tMax - a * c;

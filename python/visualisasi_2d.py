@@ -319,22 +319,55 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
         return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
     else:
         wall_seg_data = []
-        for count, line in valid_candidates[:N_WALLS]:
-            a, b, c = line
-            t_min = float('inf')
-            t_max = float('-inf')
-            for i in range(len(dense_pts)):
-                px, py = dense_pts[i]
-                if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
-                    t = -b * px + a * py
-                    if t < t_min: t_min = t
-                    if t > t_max: t_max = t
-            if t_min != float('inf') and t_max != float('-inf'):
-                x1 = -b * t_min - a * c
-                y1 =  a * t_min - b * c
-                x2 = -b * t_max - a * c
-                y2 =  a * t_max - b * c
-                wall_seg_data.append((x1, y1, x2, y2))
+        wall_lines = [c[1] for c in valid_candidates[:N_WALLS]]
+        polygon_formed = False
+        
+        if len(wall_lines) >= 3:
+            std_lines = []
+            for a, b, c in wall_lines:
+                if c < 0:
+                    std_lines.append((-a, -b, -c))
+                else:
+                    std_lines.append((a, b, c))
+            import math
+            std_lines.sort(key=lambda l: math.atan2(l[1], l[0]))
+            
+            corners = []
+            for i in range(len(std_lines)):
+                a1, b1, c1 = std_lines[i]
+                a2, b2, c2 = std_lines[(i+1)%len(std_lines)]
+                det = a1*b2 - a2*b1
+                if abs(det) > 1e-6:
+                    x = (b1*c2 - b2*c1)/det
+                    y = (a2*c1 - a1*c2)/det
+                    corners.append((x, y))
+                else:
+                    corners.append(None)
+            
+            if all(c is not None for c in corners):
+                for i in range(len(corners)):
+                    x1, y1 = corners[i]
+                    x2, y2 = corners[(i+1)%len(corners)]
+                    wall_seg_data.append((x1, y1, x2, y2))
+                polygon_formed = True
+
+        if not polygon_formed:
+            for count, line in valid_candidates[:N_WALLS]:
+                a, b, c = line
+                t_min = float('inf')
+                t_max = float('-inf')
+                for i in range(len(dense_pts)):
+                    px, py = dense_pts[i]
+                    if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
+                        t = -b * px + a * py
+                        if t < t_min: t_min = t
+                        if t > t_max: t_max = t
+                if t_min != float('inf') and t_max != float('-inf'):
+                    x1 = -b * t_min - a * c
+                    y1 =  a * t_min - b * c
+                    x2 = -b * t_max - a * c
+                    y2 =  a * t_max - b * c
+                    wall_seg_data.append((x1, y1, x2, y2))
 
         return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
 
