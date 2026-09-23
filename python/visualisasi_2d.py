@@ -41,22 +41,21 @@ OUTLIER_WINDOW = 10     # Jumlah sampel histori per sudut
 MIN_COUNT = 4           # Sudut harus diukur minimal N kali agar ditampilkan
 
 # =====================
-# KONFIGURASI WALL FITTING & NWA PHANTOM DETECTION
+# KONFIGURASI WALL & CIRCLE FITTING & NWA PHANTOM DETECTION
 # =====================
-N_WALLS           = 3      # Jumlah dinding (3 = segitiga)
+N_WALLS           = 4      # Jumlah dinding maksimum (4 = persegi/kotak)
 
-# RANSAC per segmen
-RANSAC_ITER       = 100   # Jumlah iterasi RANSAC
-RANSAC_INLIER_THR = 8.0   # cm — jarak titik ke garis agar dianggap inlier
-MIN_SEGMENT_PTS   = 8     # Jumlah titik minimum per dinding
+# RANSAC
+RANSAC_ITER       = 150   # Jumlah iterasi RANSAC
+RANSAC_INLIER_THR = 8.0   # cm — jarak titik ke garis/lingkaran agar dianggap inlier
+MIN_SEGMENT_PTS   = 30    # Jumlah titik minimum per dinding (dinaikkan agar noise tidak jadi dinding)
 
 # NWA threshold
-PHANTOM_DIST_THR  = 10.0  # cm — jika jarak ke dinding TERDEKAT > ini → phantom
+PHANTOM_DIST_THR  = 10.0  # cm — jika jarak ke model terdekat > ini → phantom
 
 # Filter densitas — buang titik terpencil sebelum RANSAC
 DENSITY_RADIUS    = 20.0  # cm — radius pencarian tetangga
 MIN_NEIGHBORS     = 5     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
-
 
 # ──────────────────────────────────────────────────────────────
 # FUNGSI BANTU GEOMETRI
@@ -154,45 +153,105 @@ def _split_and_merge(pts_idx, points, depth=0):
         return [idx] if len(idx) >= MIN_SEGMENT_PTS else []
 
 
-def _detect_walls_and_phantoms(sx, sy):
-    """
-    NWA (Nominal Wall Angle) + Sequential RANSAC:
-      0. Pre-filter: titik terpencil (lonely) langsung phantom
-      1. Sequential RANSAC — cari dinding satu per satu
-      2. Pilih N_WALLS terbaik berdasarkan jumlah inlier
-      3. Sort CCW berdasarkan sudut normal, intersect → polygon tertutup (segitiga)
-      4. NWA phantom: jarak ke dinding terdekat > threshold → phantom
+def _fit_circle_lstsq(xs, ys):
+    x = np.array(xs)
+    y = np.array(ys)
+    M = np.column_stack([x, y, np.ones(len(x))])
+    rhs = -(x**2 + y**2)
+    res, _, _, _ = np.linalg.lstsq(M, rhs, rcond=None)
+    A, B, C = res
+    xc = -A / 2
+    yc = -B / 2
+    r = np.sqrt(xc**2 + yc**2 - C)
+    return xc, yc, r
 
-    Return:
-      - wall_seg_data : list of (x1,y1,x2,y2)
-      - inlier_mask   : boolean array
-      - phantom_mask  : boolean array
+def _ransac_circle(pts):
+    if len(pts) < 3:
+        return None, None
+    xs = pts[:, 0]
+    ys = pts[:, 1]
+    
+    best_inliers = None
+    best_count = 0
+    rng = np.random.default_rng()
+    
+    for _ in range(RANSAC_ITER):
+        idx = rng.choice(len(pts), 3, replace=False)
+        p1, p2, p3 = pts[idx]
+        
+        temp1 = p2 - p1
+        temp2 = p3 - p1
+        
+        det = temp1[0]*temp2[1] - temp1[1]*temp2[0]
+        if abs(det) < 1e-6:
+            continue
+            
+        c1 = (temp1[0]**2 + temp1[1]**2) / 2
+        c2 = (temp2[0]**2 + temp2[1]**2) / 2
+        
+        xc_rel = (c1*temp2[1] - c2*temp1[1]) / det
+        yc_rel = (temp1[0]*c2 - temp2[0]*c1) / det
+        
+        xc = xc_rel + p1[0]
+        yc = yc_rel + p1[1]
+        r = np.hypot(xc_rel, yc_rel)
+        
+        dists = np.abs(np.hypot(xs - xc, ys - yc) - r)
+        inliers = dists < RANSAC_INLIER_THR
+        cnt = inliers.sum()
+        
+        if cnt > best_count:
+            best_count = cnt
+            best_inliers = inliers
+
+    if best_inliers is None or best_count < 3:
+        return None, None
+
+    pts_in = pts[best_inliers]
+    if len(pts_in) < 3:
+        return None, None
+        
+    xc, yc, r = _fit_circle_lstsq(pts_in[:, 0], pts_in[:, 1])
+    dists = np.abs(np.hypot(xs - xc, ys - yc) - r)
+    best_inliers = dists < RANSAC_INLIER_THR
+    
+    return (xc, yc, r), best_inliers
+
+def _detect_best_shape_and_phantoms(sx, sy):
+    """
+    1. Filter titik terpencil.
+    2. Coba RANSAC Circle.
+    3. Coba Sequential RANSAC Lines (N_WALLS).
+    4. Bandingkan inliers. Pilih model terbaik.
     """
     n = len(sx)
     if n < MIN_SEGMENT_PTS * 2:
-        return [], np.ones(n, bool), np.zeros(n, bool)
+        return 'none', None, np.ones(n, bool), np.zeros(n, bool)
 
     sx_np = np.array(sx, dtype=float)
     sy_np = np.array(sy, dtype=float)
     pts   = np.column_stack([sx_np, sy_np])
 
-    # ── PRE-FILTER: Buang titik terpencil (lonely point) ──────────────
-    # Titik yang tidak punya cukup tetangga dalam radius → langsung phantom
-    # Mencegah RANSAC "ketarik" ke titik terisolasi/noise
     from scipy.spatial import cKDTree
     tree = cKDTree(pts)
     neighbor_counts = np.array([
-        len(tree.query_ball_point(pts[i], DENSITY_RADIUS)) - 1  # -1 untuk exclude dirinya sendiri
+        len(tree.query_ball_point(pts[i], DENSITY_RADIUS)) - 1
         for i in range(n)
     ])
     is_lonely = neighbor_counts < MIN_NEIGHBORS
-
-    # Hanya gunakan titik yang tidak lonely untuk RANSAC
     dense_pts = pts[~is_lonely]
 
-    # ── STEP 1: Sequential RANSAC ────────────────────────────
+    if len(dense_pts) < MIN_SEGMENT_PTS:
+        return 'none', None, ~is_lonely, is_lonely
+
+    # --- Test Lingkaran ---
+    circle_model, circle_inlier_mask = _ransac_circle(dense_pts)
+    circle_inlier_count = circle_inlier_mask.sum() if circle_inlier_mask is not None else 0
+
+    # --- Test Dinding (Garis) ---
     remaining = dense_pts.copy()
-    candidates = []  # list of (inlier_count, line)
+    candidates = []
+    wall_inlier_count = 0
 
     for _ in range(N_WALLS + 3):
         if len(remaining) < MIN_SEGMENT_PTS:
@@ -204,53 +263,75 @@ def _detect_walls_and_phantoms(sx, sy):
         remaining = remaining[~inlier_mask]
         if len(inlier_pts) >= MIN_SEGMENT_PTS:
             candidates.append((len(inlier_pts), line))
+            wall_inlier_count += len(inlier_pts)
 
-    # ── STEP 2: Pilih N_WALLS dinding terbaik ────────────────────────
     candidates.sort(key=lambda x: x[0], reverse=True)
     wall_lines = [c[1] for c in candidates[:N_WALLS]]
 
-    # ── STEP 3: Batasi garis sesuai dengan titik Inlier ──────────────────
-    # Tidak lagi memaksa polygon tertutup, tapi memotong garis merah tepat di ujung titik inlier.
-    wall_seg_data = []
-    
-    for count, line in candidates[:N_WALLS]:
-        a, b, c = line
-        # Cari inliers untuk garis ini (harus di-test ulang karena inlier_mask sudah hilang)
-        t_min = float('inf')
-        t_max = float('-inf')
+    # --- Pilih Model Terbaik ---
+    # Hitung Phantom Points untuk Lingkaran
+    circle_phantom_count = n
+    if circle_model is not None:
+        xc, yc, r = circle_model
+        dists_c = np.abs(np.hypot(sx_np - xc, sy_np - yc) - r)
+        circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_lonely
+        circle_phantom_count = circle_phantom_mask.sum()
         
-        for i in range(len(dense_pts)):
-            px, py = dense_pts[i]
-            if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
-                t = -b * px + a * py
-                if t < t_min: t_min = t
-                if t > t_max: t_max = t
-                
-        if t_min != float('inf') and t_max != float('-inf'):
-            x1 = -b * t_min - a * c
-            y1 =  a * t_min - b * c
-            x2 = -b * t_max - a * c
-            y2 =  a * t_max - b * c
-            wall_seg_data.append((x1, y1, x2, y2))
-
-    # ── STEP 4: NWA + Lonely Phantom Detection ─────────────────────
-    # Phantom jika: (a) titik terpencil ATAU (b) jauh dari dinding terdekat
-    is_phantom = is_lonely.copy()
+    # Hitung Phantom Points untuk Dinding
+    wall_phantom_mask = is_lonely.copy()
     if wall_lines:
         for gi in range(n):
-            if is_phantom[gi]:
-                continue  # sudah phantom karena lonely
+            if wall_phantom_mask[gi]:
+                continue
             px, py = sx_np[gi], sy_np[gi]
             min_dist = min(abs(a * px + b * py + c) for a, b, c in wall_lines)
             if min_dist > PHANTOM_DIST_THR:
-                is_phantom[gi] = True
+                wall_phantom_mask[gi] = True
+    wall_phantom_count = wall_phantom_mask.sum()
 
-    return wall_seg_data, ~is_phantom, is_phantom
+    if SHAPE_MODE == 'circle' and circle_model is not None:
+        best_shape = 'circle'
+    elif SHAPE_MODE == 'walls':
+        best_shape = 'walls'
+    else:
+        # AUTO MODE
+        # Gunakan ide cerdas: Model yang benar akan menyisakan LEBIH SEDIKIT phantom point!
+        # Misalnya untuk persegi, model lingkaran akan menyisakan banyak phantom di 4 sudut.
+        if circle_model is not None and circle_phantom_count < wall_phantom_count:
+            best_shape = 'circle'
+        else:
+            best_shape = 'walls'
+            
+    if best_shape == 'circle' and circle_model is not None:
+        return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
+    else:
+        wall_seg_data = []
+        for count, line in candidates[:N_WALLS]:
+            a, b, c = line
+            t_min = float('inf')
+            t_max = float('-inf')
+            for i in range(len(dense_pts)):
+                px, py = dense_pts[i]
+                if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
+                    t = -b * px + a * py
+                    if t < t_min: t_min = t
+                    if t > t_max: t_max = t
+            if t_min != float('inf') and t_max != float('-inf'):
+                x1 = -b * t_min - a * c
+                y1 =  a * t_min - b * c
+                x2 = -b * t_max - a * c
+                y2 =  a * t_max - b * c
+                wall_seg_data.append((x1, y1, x2, y2))
+
+        return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
 
 
 
 class Visualisasi2D:
     def __init__(self):
+        global SHAPE_MODE
+        SHAPE_MODE = 'auto' # 'auto', 'walls', 'circle'
+        
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((UDP_IP, UDP_PORT))
 
@@ -288,11 +369,18 @@ class Visualisasi2D:
             color='#aaaaaa', markersize=2, alpha=0.4,
             label='Titik Sensor (Raw)', zorder=2)
 
-        # Garis nominal wall (merah) — LineCollection agar bisa diupdate
+        # Garis nominal wall (merah)
         self.wall_collection = mc.LineCollection(
             [], colors='#cc2222', linewidths=2.2, alpha=0.9,
             label='Nominal Wall (RANSAC)', zorder=5)
         self.ax.add_collection(self.wall_collection)
+        
+        # Lingkaran nominal (merah)
+        self.circle_patch = plt.Circle((0,0), 10, color='#cc2222', fill=False, linewidth=2.2, alpha=0.9,
+                                      label='Nominal Circle (RANSAC)', zorder=5)
+        self.circle_patch.set_visible(False)
+        self.ax.add_patch(self.circle_patch)
+        
         self.ax.plot(0, 0, 'k+', ms=12, mew=2.5, zorder=7)
 
         # Batas tampilan & dekorasi
@@ -318,6 +406,12 @@ class Visualisasi2D:
             -98, -96, '', fontsize=8, color='#f57c00',
             ha='left', va='bottom', zorder=8)
 
+        # Mode hint di pojok kanan bawah
+        self.mode_text = self.ax.text(
+            98, -96, "Tekan 'M' untuk ubah mode (Auto/Garis/Lingkaran)", 
+            fontsize=8, color='#555555',
+            ha='right', va='bottom', zorder=8)
+
         self.ax.legend(loc='upper right', facecolor='white',
                        labelcolor='#111111', fontsize=8, framealpha=0.9,
                        edgecolor='#cccccc')
@@ -336,10 +430,26 @@ class Visualisasi2D:
             self.ax.plot([0, R*np.cos(r)], [0, R*np.sin(r)],
                         color='#cccccc', lw=0.4, alpha=0.6)
 
+        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
+
         # Mulai thread penerima
         self.thread = threading.Thread(target=self._receive, daemon=True)
         self.thread.start()
 
+    def _on_key(self, event):
+        global SHAPE_MODE
+        if event.key == 'm' or event.key == 'M':
+            if SHAPE_MODE == 'auto':
+                SHAPE_MODE = 'walls'
+            elif SHAPE_MODE == 'walls':
+                SHAPE_MODE = 'circle'
+            else:
+                SHAPE_MODE = 'auto'
+            print(f"[*] Mode diubah ke: {SHAPE_MODE.upper()}")
+            # Force update plot to apply mode immediately if data is stopped
+            if hasattr(self, 'last_paket_count'):
+                self.last_paket_count = -1 
+                
     # ==========================================
     def _receive(self):
         print(f"[*] UDP listener aktif di port {UDP_PORT}...")
@@ -472,13 +582,20 @@ class Visualisasi2D:
         return sx, sy, raw_x, raw_y
 
     def _update_plot(self, frame):
+        # Hentikan update (mencegah jitter RANSAC) jika data CSV sudah selesai / tidak ada paket baru
+        if hasattr(self, 'last_paket_count') and self.last_paket_count == self.paket_count:
+            return
+        self.last_paket_count = self.paket_count
+        
         filled   = int(np.count_nonzero(self.stable_map))
         filtered = int(np.sum(self.count_map >= MIN_COUNT))
+        
+        mode_str = "AUTO" if SHAPE_MODE == 'auto' else ("KOTAK/GARIS" if SHAPE_MODE == 'walls' else "LINGKARAN")
 
         self.title_obj.set_text(
-            f'Pemetaan 2D (IMU Yaw)  |  '
-            f'{filtered}/{filled} sudut stabil  |  '
-            f'Yaw: {self.current_yaw:.1f}\u00b0  |  '
+            f'Pemetaan 2D | Mode: {mode_str} | '
+            f'{filtered}/{filled} stabil | '
+            f'Yaw: {self.current_yaw:.1f}\u00b0 | '
             f'Paket: {self.paket_count}')
 
         if filled == 0:
@@ -488,17 +605,17 @@ class Visualisasi2D:
         self.boundary.set_data(raw_x, raw_y)
 
         if len(sx) < MIN_SEGMENT_PTS * 2:
-            # Belum cukup titik untuk wall fitting
             self.scatter_inlier.set_data(sx, sy)
             self.scatter_phantom.set_data([], [])
             self.wall_collection.set_segments([])
+            self.circle_patch.set_visible(False)
             self.phantom_text.set_text('')
         else:
             sx_np = np.array(sx, dtype=float)
             sy_np = np.array(sy, dtype=float)
 
-            wall_segs, inlier_mask, phantom_mask = \
-                _detect_walls_and_phantoms(sx_np.tolist(), sy_np.tolist())
+            shape_type, shape_data, inlier_mask, phantom_mask = \
+                _detect_best_shape_and_phantoms(sx_np.tolist(), sy_np.tolist())
 
             # Titik inlier (biru)
             self.scatter_inlier.set_data(sx_np[inlier_mask],
@@ -506,17 +623,41 @@ class Visualisasi2D:
             # Titik phantom (oranye)
             self.scatter_phantom.set_data(sx_np[phantom_mask],
                                           sy_np[phantom_mask])
-            # Garis nominal wall (merah)
-            self.wall_collection.set_segments(
-                [[(x1, y1), (x2, y2)] for x1, y1, x2, y2 in wall_segs])
+                                          
+            # Gambar model yang terpilih
+            if shape_type == 'circle':
+                self.wall_collection.set_segments([])
+                if shape_data is not None:
+                    xc, yc, r = shape_data
+                    self.circle_patch.set_center((xc, yc))
+                    self.circle_patch.set_radius(r)
+                    self.circle_patch.set_visible(True)
+            elif shape_type == 'walls':
+                self.circle_patch.set_visible(False)
+                if shape_data:
+                    self.wall_collection.set_segments(
+                        [[(x1, y1), (x2, y2)] for x1, y1, x2, y2 in shape_data])
+                else:
+                    self.wall_collection.set_segments([])
+            else:
+                self.wall_collection.set_segments([])
+                self.circle_patch.set_visible(False)
 
             # Info teks
             n_ph  = int(phantom_mask.sum())
             n_tot = len(sx)
             pct   = 100 * n_ph / n_tot if n_tot > 0 else 0
+            
+            if shape_type == 'circle':
+                r = shape_data[2] if shape_data else 0
+                shape_text = f' | Shape: Lingkaran (R: {r:.1f}cm)'
+            elif shape_type == 'walls':
+                shape_text = f' | Shape: Garis Dinding ({len(shape_data)} segmen)'
+            else:
+                shape_text = ''
+                
             self.phantom_text.set_text(
-                f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%)  '
-                f'| Wall: {len(wall_segs)} segmen')
+                f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%){shape_text}')
 
     def save_data(self):
         if not self.record_log:
