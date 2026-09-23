@@ -216,7 +216,7 @@ function buildEmptyTraces() {
       hovertemplate: 'Raw: (%{x:.1f}, %{y:.1f}) cm<extra></extra>' },
     // 1: Wall lines (null-separated)
     { name: 'Nominal Wall (RANSAC)', type: 'scatter', mode: 'lines', x: [], y: [],
-      line: { color: '#cc2222', width: 2.2 },
+      line: { color: '#cc2222', width: 2.5, dash: 'dash' },
       hoverinfo: 'skip' },
     // 2: Inlier (titik dinding)
     { name: 'Titik Dinding (Inlier)', type: 'scatter', mode: 'markers', x: [], y: [],
@@ -252,8 +252,8 @@ function renderCurrentState() {
     wallSegCount = isCircle ? 1 : wallSegs.length;
     phantomCount = phantomMask.filter(Boolean).length;
 
-    inlierX  = snappedX.filter((_, i) => inlierMask[i]);
-    inlierY  = snappedY.filter((_, i) => inlierMask[i]);
+    inlierX  = sx.filter((_, i) => inlierMask[i]);
+    inlierY  = sy.filter((_, i) => inlierMask[i]);
     phantomX = sx.filter((_, i) => phantomMask[i]);
     phantomY = sy.filter((_, i) => phantomMask[i]);
 

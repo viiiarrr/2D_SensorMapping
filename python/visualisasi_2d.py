@@ -402,3 +402,381 @@ def _detect_best_shape_and_phantoms(sx, sy, counts):
         return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
     else:
         return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
+
+
+class Visualisasi2D:
+    def __init__(self):
+        global SHAPE_MODE
+        SHAPE_MODE = 'auto' # 'auto', 'walls', 'circle'
+        
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((UDP_IP, UDP_PORT))
+
+        # Peta stabil: indeks 0-359┬░ ÔåÆ jarak EMA
+        # 0 berarti belum ada data
+        self.stable_map = np.zeros(360)
+        self.count_map  = np.zeros(360, dtype=int)  # Berapa kali sudut ini diisi
+
+        # Histori per sudut untuk filter outlier (ring buffer)
+        self.hist_map = [[] for _ in range(360)]
+
+        self.current_yaw = 0.0
+        self.record_log  = []
+        self.running     = True
+        self.paket_count = 0
+
+        # =====================
+        # Setup Figure
+        # =====================
+        self.fig, self.ax = plt.subplots(figsize=(9, 9), facecolor='white')
+        self.ax.set_facecolor('white')
+
+        # Scatter titik inlier (biru) ÔÇö dekat dinding
+        self.scatter_inlier, = self.ax.plot([], [], 'o',
+            color='#1a6fb5', markersize=5, alpha=0.85,
+            label='Titik Dinding (Inlier)', zorder=4)
+
+        # Scatter titik phantom (oranye) ÔÇö jauh dari garis dinding atau tidak stabil
+        self.scatter_phantom, = self.ax.plot([], [], 'o',
+            color='#f57c00', markersize=5, alpha=0.85,
+            label='Phantom Point', zorder=4)
+
+        # Garis nominal wall (merah)
+        self.wall_collection = mc.LineCollection(
+            [], colors='#cc2222', linewidths=2.2, alpha=0.9,
+            label='Nominal Wall (RANSAC)', zorder=5)
+        self.ax.add_collection(self.wall_collection)
+        
+        # Lingkaran nominal (merah)
+        self.circle_patch = plt.Circle((0,0), 10, color='#cc2222', fill=False, linewidth=2.2, alpha=0.9,
+                                      label='Nominal Circle (RANSAC)', zorder=5)
+        self.circle_patch.set_visible(False)
+        self.ax.add_patch(self.circle_patch)
+        
+        self.ax.plot(0, 0, 'k+', ms=12, mew=2.5, zorder=7)
+
+        # Batas tampilan & dekorasi
+        R = 100
+        self.ax.set_xlim(-R, R)
+        self.ax.set_ylim(-R, R)
+        self.ax.set_aspect('equal')
+        self.ax.grid(True, ls='--', alpha=0.3, color='#aaaaaa')
+        self.ax.axhline(0, color='#888888', lw=0.7, alpha=0.5)
+        self.ax.axvline(0, color='#888888', lw=0.7, alpha=0.5)
+        self.ax.set_xlabel('X (cm)', color='#333333')
+        self.ax.set_ylabel('Y (cm)', color='#333333')
+        self.ax.tick_params(colors='#333333')
+        for s in self.ax.spines.values():
+            s.set_edgecolor('#cccccc')
+
+        self.title_obj = self.ax.set_title(
+            'Pemetaan 2D ÔÇö Menunggu data ESP32...',
+            color='#111111', fontsize=13, fontweight='bold', pad=12)
+
+        # Info phantom di pojok kiri bawah
+        self.phantom_text = self.ax.text(
+            -98, -96, '', fontsize=8, color='#f57c00',
+            ha='left', va='bottom', zorder=8)
+
+        # Mode hint di pojok kanan bawah
+        self.mode_text = self.ax.text(
+            98, -96, "Tekan 'M' untuk ubah mode (Auto/Garis/Lingkaran)", 
+            fontsize=8, color='#555555',
+            ha='right', va='bottom', zorder=8)
+
+        self.ax.legend(loc='upper right', facecolor='white',
+                       labelcolor='#111111', fontsize=8, framealpha=0.9,
+                       edgecolor='#cccccc')
+
+        # Lingkaran referensi jarak
+        for r in [25, 50, 75, 100]:
+            c = plt.Circle((0,0), r, fill=False, color='#aaaaaa',
+                           lw=0.6, alpha=0.5)
+            self.ax.add_patch(c)
+            self.ax.text(r+1, 2, f'{r}cm', color='#888888',
+                        fontsize=7, alpha=0.8)
+
+        # Garis arah mata angin (tipis)
+        for ang in [0, 45, 90, 135, 180, 225, 270, 315]:
+            r = np.radians(ang)
+            self.ax.plot([0, R*np.cos(r)], [0, R*np.sin(r)],
+                        color='#cccccc', lw=0.4, alpha=0.6)
+
+        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
+
+        # Mulai thread penerima
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
+
+    def _on_key(self, event):
+        global SHAPE_MODE
+        if event.key == 'm' or event.key == 'M':
+            if SHAPE_MODE == 'auto':
+                SHAPE_MODE = 'walls'
+            elif SHAPE_MODE == 'walls':
+                SHAPE_MODE = 'circle'
+            else:
+                SHAPE_MODE = 'auto'
+            print(f"[*] Mode diubah ke: {SHAPE_MODE.upper()}")
+            # Force update plot to apply mode immediately if data is stopped
+            if hasattr(self, 'last_paket_count'):
+                self.last_paket_count = -1 
+                
+    # ==========================================
+    def _receive(self):
+        print(f"[*] Membaca data CSV: {CSV_FILE_PATH}")
+        import time, csv
+        try:
+            with open(CSV_FILE_PATH, 'r') as f:
+                reader = csv.reader(f)
+                next(reader, None) # skip header
+                for row in reader:
+                    if not self.running:
+                        break
+                    if len(row) < 10:
+                        continue
+                    
+                    yaw_raw = row[1]
+                    distances = ",".join(row[2:10])
+                    msg = f"{yaw_raw},{distances}"
+                    self._parse(msg)
+                    time.sleep(0.05) # simulate 20Hz update
+        except Exception as e:
+            if self.running:
+                print(f"[!] {e}")
+
+    def _parse(self, message):
+        try:
+            parts = message.split(',')
+            if len(parts) != 9:
+                return
+
+            yaw_raw   = float(parts[0])
+            distances = [float(x) for x in parts[1:]]
+            self.current_yaw = yaw_raw
+            self.paket_count += 1
+
+            # Log
+            now = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            self.record_log.append(
+                [now, round(yaw_raw, 2)] + [round(d, 1) for d in distances])
+
+            for i in range(NUM_SENSOR):
+                dist = distances[i]
+                if dist < MIN_DIST or dist > MAX_DIST:
+                    continue
+
+                # ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+                # RUMUS KUNCI:
+                # CW  = yaw negatif ÔåÆ physical = -yaw ÔåÆ naik positif
+                # CCW = yaw positif ÔåÆ physical = -yaw ÔåÆ turun ke 0
+                # Keduanya pakai formula SAMA: (-yaw + offset_sensor) % 360
+                # ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+                physical_deg = (-yaw_raw + i * SENSOR_STEP) % 360
+                idx = int(physical_deg) % 360
+
+                # ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+                # FILTER OUTLIER per sudut:
+                # Jika histori sudah cukup, tolak data yang menyimpang
+                # lebih dari OUTLIER_SIGMA * std dari median histori
+                # ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+                hist = self.hist_map[idx]
+                if len(hist) >= OUTLIER_WINDOW:
+                    med = np.median(hist)
+                    std = np.std(hist)
+                    if std > 0 and abs(dist - med) > OUTLIER_SIGMA * std:
+                        continue  # Buang data noise/spike
+
+                # Simpan ke histori (ring buffer)
+                hist.append(dist)
+                if len(hist) > OUTLIER_WINDOW:
+                    hist.pop(0)
+
+                # Update EMA di stable_map
+                if self.stable_map[idx] == 0:
+                    self.stable_map[idx] = dist
+                else:
+                    self.stable_map[idx] = (
+                        (1 - EMA_ALPHA) * self.stable_map[idx]
+                        + EMA_ALPHA * dist)
+                self.count_map[idx] += 1
+
+        except (ValueError, IndexError):
+            pass
+
+    def _fit_rectangle(self, xs, ys):
+        """
+        Fit persegi panjang ke titik-titik point cloud menggunakan PCA.
+        PCA menemukan orientasi utama ruangan secara otomatis,
+        lalu bounding rectangle digambar pada sumbu principal tersebut.
+        """
+        pts = np.column_stack([xs, ys])
+        if len(pts) < 10:
+            return [], []
+
+        # Pusat massa titik-titik
+        center = pts.mean(axis=0)
+        pts_c  = pts - center
+
+        # PCA: eigen-decomposition dari covariance matrix
+        cov = np.cov(pts_c.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+        # Urutkan: eigenvalue terbesar = sumbu utama (panjang ruangan)
+        order = eigenvalues.argsort()[::-1]
+        V = eigenvectors[:, order]          # Kolom = sumbu utama PCA
+
+        # Proyeksikan semua titik ke sumbu PCA
+        proj = pts_c @ V
+
+        # Batas rectangle dalam ruang PCA
+        lo = proj.min(axis=0)
+        hi = proj.max(axis=0)
+
+        # 4 sudut rectangle dalam ruang PCA (polygon tertutup)
+        corners_p = np.array([
+            [lo[0], lo[1]],
+            [hi[0], lo[1]],
+            [hi[0], hi[1]],
+            [lo[0], hi[1]],
+            [lo[0], lo[1]],   # Tutup polygon
+        ])
+
+        # Transformasi balik ke koordinat dunia (cm)
+        corners = corners_p @ V.T + center
+        return corners[:, 0].tolist(), corners[:, 1].tolist()
+
+    def _build_from_map(self):
+        """Bangun daftar titik terfilter dari stable_map."""
+        sx, sy, counts = [], [], []
+
+        for i in range(360):
+            d = self.stable_map[i]
+            if d > 0:
+                rad = np.radians(i)
+                x = d * np.cos(rad)
+                y = d * np.sin(rad)
+                sx.append(x)
+                sy.append(y)
+                counts.append(self.count_map[i])
+
+        return sx, sy, counts
+
+    def _update_plot(self, frame):
+        # Hentikan update (mencegah jitter RANSAC) jika data CSV sudah selesai / tidak ada paket baru
+        if hasattr(self, 'last_paket_count') and self.last_paket_count == self.paket_count:
+            return
+        self.last_paket_count = self.paket_count
+        
+        filled   = int(np.count_nonzero(self.stable_map))
+        filtered = int(np.sum(self.count_map >= MIN_COUNT))
+        
+        mode_str = "AUTO" if SHAPE_MODE == 'auto' else ("KOTAK/GARIS" if SHAPE_MODE == 'walls' else "LINGKARAN")
+
+        self.title_obj.set_text(
+            f'Pemetaan 2D | Mode: {mode_str} | '
+            f'{filtered}/{filled} stabil | '
+            f'Yaw: {self.current_yaw:.1f}\u00b0 | '
+            f'Paket: {self.paket_count}')
+
+        if filled == 0:
+            return
+
+        sx, sy, counts = self._build_from_map()
+
+        if len(sx) < MIN_SEGMENT_PTS * 2:
+            self.scatter_inlier.set_data(sx, sy)
+            self.scatter_phantom.set_data([], [])
+            self.wall_collection.set_segments([])
+            self.circle_patch.set_visible(False)
+            self.phantom_text.set_text('')
+        else:
+            sx_np = np.array(sx, dtype=float)
+            sy_np = np.array(sy, dtype=float)
+
+            shape_type, shape_data, inlier_mask, phantom_mask = \
+                _detect_best_shape_and_phantoms(sx_np.tolist(), sy_np.tolist(), counts)
+
+            # Titik inlier (biru)
+            self.scatter_inlier.set_data(sx_np[inlier_mask],
+                                         sy_np[inlier_mask])
+            # Titik phantom (oranye)
+            self.scatter_phantom.set_data(sx_np[phantom_mask],
+                                          sy_np[phantom_mask])
+                                          
+            # Gambar model yang terpilih
+            if shape_type == 'circle':
+                self.wall_collection.set_segments([])
+                if shape_data is not None:
+                    xc, yc, r = shape_data
+                    self.circle_patch.set_center((xc, yc))
+                    self.circle_patch.set_radius(r)
+                    self.circle_patch.set_visible(True)
+            elif shape_type == 'walls':
+                self.circle_patch.set_visible(False)
+                if shape_data:
+                    self.wall_collection.set_segments(
+                        [[(x1, y1), (x2, y2)] for x1, y1, x2, y2 in shape_data])
+                else:
+                    self.wall_collection.set_segments([])
+            else:
+                self.wall_collection.set_segments([])
+                self.circle_patch.set_visible(False)
+
+            # Info teks
+            n_ph  = int(phantom_mask.sum())
+            n_tot = len(sx)
+            pct   = 100 * n_ph / n_tot if n_tot > 0 else 0
+            
+            if shape_type == 'circle':
+                r = shape_data[2] if shape_data else 0
+                shape_text = f' | Shape: Lingkaran (R: {r:.1f}cm)'
+            elif shape_type == 'walls':
+                shape_text = f' | Shape: Garis Dinding ({len(shape_data)} segmen)'
+            else:
+                shape_text = ''
+                
+            self.phantom_text.set_text(
+                f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%){shape_text}')
+
+    def save_data(self):
+        if not self.record_log:
+            print("\n[-] Tidak ada data. Simpan dilewati.")
+            return
+        base = "Data"
+        os.makedirs(base, exist_ok=True)
+        idx = 1
+        while os.path.exists(os.path.join(base, f"percobaan_{idx}")):
+            idx += 1
+        d = os.path.join(base, f"percobaan_{idx}")
+        os.makedirs(d)
+        with open(os.path.join(d, "koordinat.csv"), 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(["Waktu", "Yaw_IMU"] +
+                        [f"Sensor_{i+1}" for i in range(8)])
+            w.writerows(self.record_log)
+        self.fig.savefig(os.path.join(d, "peta_2d.png"),
+                         dpi=300, bbox_inches='tight',
+                         facecolor='white')
+        print(f"\n[+] Tersimpan: {d}")
+        print(f"    {len(self.record_log)} baris | "
+              f"{int(np.count_nonzero(self.stable_map))}/360 sudut terpetakan")
+
+    def start(self):
+        self.anim = FuncAnimation(
+            self.fig, self._update_plot,
+            interval=200, blit=False, cache_frame_data=False)
+        plt.tight_layout()
+        plt.show()
+
+
+if __name__ == "__main__":
+    app = Visualisasi2D()
+    try:
+        app.start()
+    except KeyboardInterrupt:
+        print("\n[!] Menutup...")
+    finally:
+        app.running = False
+        app.save_data()
+        app.sock.close()
