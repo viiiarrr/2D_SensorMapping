@@ -444,13 +444,8 @@ class SensorProcessor {
         }
       }
       
-      // Phantom deteksi untuk lingkaran
-      const isPhantom = isPhantomBase.slice();
-      for (let gi = 0; gi < n; gi++) {
-        if (isPhantom[gi] || inlierMask[gi]) continue;
-        const dCenter = Math.hypot(sx[gi] - cx, sy[gi] - cy);
-        if (Math.abs(dCenter - r) > p.phantom_dist_thr) isPhantom[gi] = true;
-      }
+      // Semua titik yang bukan inlier adalah Phantom Point
+      const isPhantom = inlierMask.map(is_inlier => !is_inlier);
       
       return {
         isCircle: true,
@@ -497,21 +492,37 @@ class SensorProcessor {
       for (let w = 0; w < wallLines.length; w++) {
         const line = wallLines[w];
         const [a, b, c] = line;
+        const seg = polygonFormed ? wallSegs[w] : null;
         let tMin = Infinity, tMax = -Infinity;
         
         for (let i = 0; i < n; i++) {
-          if (isLonely[i]) continue;
+          if (isPhantomBase[i]) continue; // Langsung skip unstable/lonely
           const dist = Math.abs(a * sx[i] + b * sy[i] + c);
           if (dist <= p.ransac_inlier_thr) {
-            if (inlierOfWall[i] === -1) inlierOfWall[i] = w;
             
-            if (inlierOfWall[i] === w) {
-              const t = -b * sx[i] + a * sy[i];
-              if (t < tMin) tMin = t;
-              if (t > tMax) tMax = t;
+            // Cek apakah proyeksi jatuh di dalam segmen polygon
+            let validInSegment = true;
+            if (seg) {
+               const [x1, y1, x2, y2] = seg;
+               const dx = x2 - x1, dy = y2 - y1;
+               const L2 = dx*dx + dy*dy;
+               if (L2 > 1e-6) {
+                 const t = ((sx[i] - x1)*dx + (sy[i] - y1)*dy) / L2;
+                 if (t < -0.1 || t > 1.1) validInSegment = false;
+               }
+            }
+            
+            if (validInSegment) {
+              if (inlierOfWall[i] === -1) inlierOfWall[i] = w;
               
-              snappedX[i] = -b * t - a * c;
-              snappedY[i] =  a * t - b * c;
+              if (inlierOfWall[i] === w) {
+                const tProj = -b * sx[i] + a * sy[i];
+                if (tProj < tMin) tMin = tProj;
+                if (tProj > tMax) tMax = tProj;
+                
+                snappedX[i] = -b * tProj - a * c;
+                snappedY[i] =  a * tProj - b * c;
+              }
             }
           }
         }
@@ -525,21 +536,8 @@ class SensorProcessor {
         }
       }
 
-      const isPhantom = isPhantomBase.slice();
-      if (wallLines.length > 0) {
-        for (let gi = 0; gi < n; gi++) {
-          if (isPhantom[gi]) continue;
-          if (inlierOfWall[gi] !== -1) continue; 
-          
-          const px = sx[gi], py = sy[gi];
-          let minDist = Infinity;
-          for (const [a, b, c] of wallLines) {
-            const d = Math.abs(a * px + b * py + c);
-            if (d < minDist) minDist = d;
-          }
-          if (minDist > p.phantom_dist_thr) isPhantom[gi] = true;
-        }
-      }
+      // Semua titik yang bukan inlier adalah Phantom Point
+      const isPhantom = inlierOfWall.map(w => w === -1);
 
       return {
         isCircle: false,
