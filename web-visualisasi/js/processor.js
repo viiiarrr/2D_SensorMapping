@@ -392,8 +392,9 @@ class SensorProcessor {
     const wallLines = validCandidates.slice(0, N_WALLS).map(c => c.line);
 
     // ── AUTO-DETECTION: Pilih yang skor inlier-nya lebih tinggi ──
-    // Lingkaran diberi sedikit handicap (1.1x) agar tidak mudah mendeteksi ruangan kotak kecil sebagai lingkaran
-    const isCircle = circleScore > lineScore * 1.05; // Kurangi handicap agar lebih sensitif ke lingkaran
+    // Lingkaran adalah model yang lebih sederhana (3 parameter vs 12 parameter untuk 4 garis).
+    // Berikan toleransi (bias) pada lingkaran: jika skor lingkaran mendekati skor garis (>= 90%), pilih lingkaran!
+    const isCircle = circleScore >= lineScore * 0.90;
     console.log(`[Auto-Detect] Circle Score: ${circleScore}, Line Score: ${lineScore} -> Mode: ${isCircle ? 'CIRCLE' : 'LINES'}`);
 
     const snappedX = [...sx];
