@@ -391,11 +391,37 @@ class SensorProcessor {
     }
     const wallLines = validCandidates.slice(0, N_WALLS).map(c => c.line);
 
-    // ── AUTO-DETECTION: Pilih yang skor inlier-nya lebih tinggi ──
-    // Lingkaran adalah model yang lebih sederhana (3 parameter vs 12 parameter untuk 4 garis).
-    // Berikan toleransi (bias) pada lingkaran: jika skor lingkaran mendekati skor garis (>= 90%), pilih lingkaran!
-    const isCircle = circleScore >= lineScore * 0.90;
-    console.log(`[Auto-Detect] Circle Score: ${circleScore}, Line Score: ${lineScore} -> Mode: ${isCircle ? 'CIRCLE' : 'LINES'}`);
+    // ── AUTO-DETECTION: Gunakan pendekatan Phantom Count (seperti versi Python) ──
+    // Model yang benar akan menyisakan LEBIH SEDIKIT phantom point.
+    let circlePhantomCount = n;
+    if (circleRes) {
+      const { cx, cy, r } = circleRes.circle;
+      const cPhantom = isPhantomBase.slice();
+      for (let i = 0; i < n; i++) {
+        if (cPhantom[i]) continue;
+        const dCenter = Math.hypot(sx[i] - cx, sy[i] - cy);
+        if (Math.abs(dCenter - r) > p.phantom_dist_thr) cPhantom[i] = true;
+      }
+      circlePhantomCount = cPhantom.filter(Boolean).length;
+    }
+
+    let wallPhantomCount = n;
+    const wPhantom = isPhantomBase.slice();
+    if (wallLines.length > 0) {
+      for (let i = 0; i < n; i++) {
+        if (wPhantom[i]) continue;
+        let minDist = Infinity;
+        for (const [a, b, c] of wallLines) {
+          const d = Math.abs(a * sx[i] + b * sy[i] + c);
+          if (d < minDist) minDist = d;
+        }
+        if (minDist > p.phantom_dist_thr) wPhantom[i] = true;
+      }
+      wallPhantomCount = wPhantom.filter(Boolean).length;
+    }
+
+    const isCircle = circleRes && (circlePhantomCount <= wallPhantomCount);
+    console.log(`[Auto-Detect] Circle Phantoms: ${circlePhantomCount}, Wall Phantoms: ${wallPhantomCount} -> Mode: ${isCircle ? 'CIRCLE' : 'LINES'}`);
 
     const snappedX = [...sx];
     const snappedY = [...sy];
