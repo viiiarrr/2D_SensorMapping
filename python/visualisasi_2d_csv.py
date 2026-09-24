@@ -72,12 +72,13 @@ CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_66\koordinat.csv"
 # ──────────────────────────────────────────────────────────────
 
 def _point_to_line_dist(px, py, x1, y1, x2, y2):
-    """Jarak tegak lurus titik (px,py) ke garis melalui (x1,y1)-(x2,y2)."""
+    """Jarak titik (px,py) ke segmen garis (x1,y1)-(x2,y2)."""
     dx, dy = x2 - x1, y2 - y1
     len2   = dx*dx + dy*dy
     if len2 == 0:
         return np.hypot(px - x1, py - y1)
     t = ((px - x1)*dx + (py - y1)*dy) / len2
+    t = max(0.0, min(1.0, t))
     return np.hypot(px - (x1 + t*dx), py - (y1 + t*dy))
 
 
@@ -287,13 +288,91 @@ def _detect_best_shape_and_phantoms(sx, sy):
         circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_lonely
         circle_phantom_count = circle_phantom_mask.sum()
         
-    # Hitung Phantom Points untuk Dinding
+    wall_seg_data = []
+    import math
+    if len(wall_lines) >= 3:
+        sorted_lines = []
+        for a, b, c in wall_lines:
+            angle = math.atan2(b, a)
+            sorted_lines.append((angle, a, b, c))
+        sorted_lines.sort(key=lambda item: item[0])
+        
+        corners = []
+        valid_polygon = True
+        for i in range(len(sorted_lines)):
+            _, a1, b1, c1 = sorted_lines[i]
+            _, a2, b2, c2 = sorted_lines[(i+1) % len(sorted_lines)]
+            det = a1 * b2 - a2 * b1
+            if abs(det) > 1e-3:
+                x = (b1 * c2 - b2 * c1) / det
+                y = (a2 * c1 - a1 * c2) / det
+                corners.append((x, y))
+            else:
+                valid_polygon = False
+                break
+                
+        if valid_polygon:
+            for i in range(len(corners)):
+                x1, y1 = corners[i]
+                x2, y2 = corners[(i+1) % len(corners)]
+                wall_seg_data.append((x1, y1, x2, y2))
+                
+    # Fallback jika polygon gagal terbentuk
+    if not wall_seg_data:
+        for count, line in candidates[:N_WALLS]:
+            a, b, c = line
+            t_min = float('inf')
+            t_max = float('-inf')
+            for i in range(len(dense_pts)):
+                px, py = dense_pts[i]
+                if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
+                    t = -b * px + a * py
+                    if t < t_min: t_min = t
+                    if t > t_max: t_max = t
+            if t_min != float('inf') and t_max != float('-inf'):
+                x1 = -b * t_min - a * c
+                y1 =  a * t_min - b * c
+                x2 = -b * t_max - a * c
+                y2 =  a * t_max - b * c
+                wall_seg_data.append((x1, y1, x2, y2))
+
+    # Hitung Phantom Points untuk Dinding (menggunakan segmen kotak jika ada)
     wall_phantom_mask = is_lonely.copy()
-    if wall_lines:
+    if wall_seg_data:
         for gi in range(n):
             if wall_phantom_mask[gi]:
                 continue
             px, py = sx_np[gi], sy_np[gi]
+            
+            is_outside = False
+            for a, b, c in wall_lines:
+                if (a * px + b * py + c) < -RANSAC_INLIER_THR: # toleransi setebal inlier RANSAC agar dinding tidak terpotong
+                    is_outside = True
+                    break
+            
+            if is_outside:
+                wall_phantom_mask[gi] = True
+                continue
+                
+            min_dist = min(_point_to_line_dist(px, py, x1, y1, x2, y2) for x1, y1, x2, y2 in wall_seg_data)
+            if min_dist > PHANTOM_DIST_THR:
+                wall_phantom_mask[gi] = True
+    elif wall_lines:
+        for gi in range(n):
+            if wall_phantom_mask[gi]:
+                continue
+            px, py = sx_np[gi], sy_np[gi]
+            
+            is_outside = False
+            for a, b, c in wall_lines:
+                if (a * px + b * py + c) < -RANSAC_INLIER_THR: # toleransi setebal inlier RANSAC
+                    is_outside = True
+                    break
+                    
+            if is_outside:
+                wall_phantom_mask[gi] = True
+                continue
+                
             min_dist = min(abs(a * px + b * py + c) for a, b, c in wall_lines)
             if min_dist > PHANTOM_DIST_THR:
                 wall_phantom_mask[gi] = True
@@ -305,8 +384,6 @@ def _detect_best_shape_and_phantoms(sx, sy):
         best_shape = 'walls'
     else:
         # AUTO MODE
-        # Gunakan ide cerdas: Model yang benar akan menyisakan LEBIH SEDIKIT phantom point!
-        # Misalnya untuk persegi, model lingkaran akan menyisakan banyak phantom di 4 sudut.
         if circle_model is not None and circle_phantom_count < wall_phantom_count:
             best_shape = 'circle'
         else:
@@ -315,55 +392,6 @@ def _detect_best_shape_and_phantoms(sx, sy):
     if best_shape == 'circle' and circle_model is not None:
         return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
     else:
-        wall_seg_data = []
-        import math
-        
-        if len(wall_lines) >= 3:
-            sorted_lines = []
-            for a, b, c in wall_lines:
-                angle = math.atan2(b, a)
-                sorted_lines.append((angle, a, b, c))
-            sorted_lines.sort(key=lambda item: item[0])
-            
-            corners = []
-            valid_polygon = True
-            for i in range(len(sorted_lines)):
-                _, a1, b1, c1 = sorted_lines[i]
-                _, a2, b2, c2 = sorted_lines[(i+1) % len(sorted_lines)]
-                det = a1 * b2 - a2 * b1
-                if abs(det) > 1e-3:
-                    x = (b1 * c2 - b2 * c1) / det
-                    y = (a2 * c1 - a1 * c2) / det
-                    corners.append((x, y))
-                else:
-                    valid_polygon = False
-                    break
-                    
-            if valid_polygon:
-                for i in range(len(corners)):
-                    x1, y1 = corners[i]
-                    x2, y2 = corners[(i+1) % len(corners)]
-                    wall_seg_data.append((x1, y1, x2, y2))
-                    
-        # Fallback jika polygon gagal terbentuk (garis tidak lengkap atau sejajar)
-        if not wall_seg_data:
-            for count, line in candidates[:N_WALLS]:
-                a, b, c = line
-                t_min = float('inf')
-                t_max = float('-inf')
-                for i in range(len(dense_pts)):
-                    px, py = dense_pts[i]
-                    if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
-                        t = -b * px + a * py
-                        if t < t_min: t_min = t
-                        if t > t_max: t_max = t
-                if t_min != float('inf') and t_max != float('-inf'):
-                    x1 = -b * t_min - a * c
-                    y1 =  a * t_min - b * c
-                    x2 = -b * t_max - a * c
-                    y2 =  a * t_max - b * c
-                    wall_seg_data.append((x1, y1, x2, y2))
-
         return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
 
 
