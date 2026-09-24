@@ -214,18 +214,18 @@ function buildEmptyTraces() {
     { name: 'Titik Sensor (Raw)', type: 'scatter', mode: 'markers', x: [], y: [],
       marker: { color: '#aaaaaa', size: 3, opacity: 0.5 },
       hovertemplate: 'Raw: (%{x:.1f}, %{y:.1f}) cm<extra></extra>' },
-    // 1: Wall lines (null-separated)
-    { name: 'Nominal Wall (RANSAC)', type: 'scatter', mode: 'lines', x: [], y: [],
-      line: { color: '#cc2222', width: 2.5, dash: 'dash' },
-      hoverinfo: 'skip' },
-    // 2: Inlier (titik dinding)
+    // 1: Inlier (titik dinding)
     { name: 'Titik Dinding (Inlier)', type: 'scatter', mode: 'markers', x: [], y: [],
       marker: { color: '#1a6fb5', size: 6, opacity: 0.9 },
       hovertemplate: 'Inlier: (%{x:.1f}, %{y:.1f}) cm<extra></extra>' },
-    // 3: Phantom
+    // 2: Phantom
     { name: 'Phantom Point', type: 'scatter', mode: 'markers', x: [], y: [],
-      marker: { color: '#f57c00', size: 7, opacity: 0.95 },
+      marker: { color: '#1a6fb5', size: 7, opacity: 0.95 },
       hovertemplate: 'Phantom: (%{x:.1f}, %{y:.1f}) cm<extra></extra>' },
+    // 3: Wall lines (null-separated)
+    { name: 'Nominal Wall (RANSAC)', type: 'scatter', mode: 'lines', x: [], y: [],
+      line: { color: '#cc2222', width: 2.5, dash: 'dash' },
+      hoverinfo: 'skip' },
     // 4: Pusat sensor (cross)
     { name: 'Posisi Sensor', type: 'scatter', mode: 'markers', x: [0], y: [0],
       marker: { color: '#111827', size: 10, symbol: 'cross', line: { width: 2.5, color: '#111827' } },
@@ -280,20 +280,20 @@ function renderCurrentState() {
     {
       x: [
         layers.raw     ? rawX    : [],
-        layers.wall    ? wallX   : [],
         layers.inlier  ? inlierX : [],
         layers.phantom ? phantomX: [],
+        layers.wall    ? wallX   : [],
         [0],
       ],
       y: [
         layers.raw     ? rawY    : [],
-        layers.wall    ? wallY   : [],
         layers.inlier  ? inlierY : [],
         layers.phantom ? phantomY: [],
+        layers.wall    ? wallY   : [],
         [0],
       ],
       visible: [
-        layers.raw, layers.wall, layers.inlier, layers.phantom, true,
+        layers.raw, layers.inlier, layers.phantom, layers.wall, true,
       ],
     },
     {
