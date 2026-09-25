@@ -51,11 +51,11 @@ RANSAC_INLIER_THR = 8.0   # cm — jarak titik ke garis/lingkaran agar dianggap 
 MIN_SEGMENT_PTS   = 30    # Jumlah titik minimum per dinding (dinaikkan agar noise tidak jadi dinding)
 
 # NWA threshold
-PHANTOM_DIST_THR  = 10.0  # cm — jika jarak ke model terdekat > ini → phantom
+PHANTOM_DIST_THR  = 5.0   # cm — jika jarak ke model terdekat > ini → phantom (disamakan dengan RANSAC_INLIER_THR)
 
 # Filter densitas — buang titik terpencil sebelum RANSAC
 DENSITY_RADIUS    = 20.0  # cm — radius pencarian tetangga
-MIN_NEIGHBORS     = 5     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
+MIN_NEIGHBORS     = 3     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
 
 # =====================
 # KONFIGURASI CSV
@@ -164,76 +164,10 @@ def _split_and_merge(pts_idx, points, depth=0):
         return [idx] if len(idx) >= MIN_SEGMENT_PTS else []
 
 
-def _fit_circle_lstsq(xs, ys):
-    x = np.array(xs)
-    y = np.array(ys)
-    M = np.column_stack([x, y, np.ones(len(x))])
-    rhs = -(x**2 + y**2)
-    res, _, _, _ = np.linalg.lstsq(M, rhs, rcond=None)
-    A, B, C = res
-    xc = -A / 2
-    yc = -B / 2
-    r = np.sqrt(xc**2 + yc**2 - C)
-    return xc, yc, r
-
-def _ransac_circle(pts):
-    if len(pts) < 3:
-        return None, None
-    xs = pts[:, 0]
-    ys = pts[:, 1]
-    
-    best_inliers = None
-    best_count = 0
-    rng = np.random.default_rng()
-    
-    for _ in range(RANSAC_ITER):
-        idx = rng.choice(len(pts), 3, replace=False)
-        p1, p2, p3 = pts[idx]
-        
-        temp1 = p2 - p1
-        temp2 = p3 - p1
-        
-        det = temp1[0]*temp2[1] - temp1[1]*temp2[0]
-        if abs(det) < 1e-6:
-            continue
-            
-        c1 = (temp1[0]**2 + temp1[1]**2) / 2
-        c2 = (temp2[0]**2 + temp2[1]**2) / 2
-        
-        xc_rel = (c1*temp2[1] - c2*temp1[1]) / det
-        yc_rel = (temp1[0]*c2 - temp2[0]*c1) / det
-        
-        xc = xc_rel + p1[0]
-        yc = yc_rel + p1[1]
-        r = np.hypot(xc_rel, yc_rel)
-        
-        dists = np.abs(np.hypot(xs - xc, ys - yc) - r)
-        inliers = dists < RANSAC_INLIER_THR
-        cnt = inliers.sum()
-        
-        if cnt > best_count:
-            best_count = cnt
-            best_inliers = inliers
-
-    if best_inliers is None or best_count < 3:
-        return None, None
-
-    pts_in = pts[best_inliers]
-    if len(pts_in) < 3:
-        return None, None
-        
-    xc, yc, r = _fit_circle_lstsq(pts_in[:, 0], pts_in[:, 1])
-    dists = np.abs(np.hypot(xs - xc, ys - yc) - r)
-    best_inliers = dists < RANSAC_INLIER_THR
-    
-    return (xc, yc, r), best_inliers
-
 def _detect_best_shape_and_phantoms(sx, sy):
     """
     1. Filter titik terpencil.
-    2. Coba RANSAC Circle.
-    3. Coba Sequential RANSAC Lines (N_WALLS).
-    4. Bandingkan inliers. Pilih model terbaik.
+    2. Jalankan RANSAC Lines (N_WALLS) untuk deteksi dinding.
     """
     n = len(sx)
     if n < MIN_SEGMENT_PTS * 2:
@@ -255,10 +189,6 @@ def _detect_best_shape_and_phantoms(sx, sy):
     if len(dense_pts) < MIN_SEGMENT_PTS:
         return 'none', None, ~is_lonely, is_lonely
 
-    # --- Test Lingkaran ---
-    circle_model, circle_inlier_mask = _ransac_circle(dense_pts)
-    circle_inlier_count = circle_inlier_mask.sum() if circle_inlier_mask is not None else 0
-
     # --- Test Dinding (Garis) ---
     remaining = dense_pts.copy()
     candidates = []
@@ -278,63 +208,90 @@ def _detect_best_shape_and_phantoms(sx, sy):
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     wall_lines = [c[1] for c in candidates[:N_WALLS]]
-
-    # --- Pilih Model Terbaik ---
-    # Hitung Phantom Points untuk Lingkaran
-    circle_phantom_count = n
-    if circle_model is not None:
-        xc, yc, r = circle_model
-        dists_c = np.abs(np.hypot(sx_np - xc, sy_np - yc) - r)
-        circle_phantom_mask = (dists_c > PHANTOM_DIST_THR) | is_lonely
-        circle_phantom_count = circle_phantom_mask.sum()
-        
     wall_seg_data = []
     import math
-    if len(wall_lines) >= 3:
-        sorted_lines = []
-        for a, b, c in wall_lines:
-            angle = math.atan2(b, a)
-            sorted_lines.append((angle, a, b, c))
-        sorted_lines.sort(key=lambda item: item[0])
+    segments = []
+    
+    # 1. Cari batas inlier (t_min, t_max) untuk setiap garis RANSAC
+    for a, b, c in wall_lines:
+        t_vals = []
+        for i in range(len(dense_pts)):
+            px, py = dense_pts[i]
+            if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
+                t = -b * px + a * py
+                t_vals.append(t)
+                
+        if t_vals:
+            t_vals.sort()
+            # Filter gap: pastikan garis tidak ditarik secara fiktif oleh titik dari dinding lain yang kebetulan segaris
+            # Kita hanya mengambil cluster titik terpanjang yang jarak antar titiknya tidak lebih dari 12 cm.
+            max_cluster = []
+            current_cluster = [t_vals[0]]
+            for k in range(1, len(t_vals)):
+                if t_vals[k] - t_vals[k-1] > 12.0:
+                    if len(current_cluster) > len(max_cluster):
+                        max_cluster = current_cluster
+                    current_cluster = [t_vals[k]]
+                else:
+                    current_cluster.append(t_vals[k])
+            if len(current_cluster) > len(max_cluster):
+                max_cluster = current_cluster
+                
+            t_min = max_cluster[0]
+            t_max = max_cluster[-1]
+            segments.append({'line': (a, b, c), 't_min': t_min, 't_max': t_max})
+
+    # 2. Urutkan berdasarkan sudut normal agar bisa mencari perpotongan garis bersebelahan
+    if len(segments) >= 2:
+        segments.sort(key=lambda s: math.atan2(s['line'][1], s['line'][0]))
         
-        corners = []
-        valid_polygon = True
-        for i in range(len(sorted_lines)):
-            _, a1, b1, c1 = sorted_lines[i]
-            _, a2, b2, c2 = sorted_lines[(i+1) % len(sorted_lines)]
+        for i in range(len(segments)):
+            s1 = segments[i]
+            s2 = segments[(i+1) % len(segments)]
+            
+            a1, b1, c1 = s1['line']
+            a2, b2, c2 = s2['line']
+            
             det = a1 * b2 - a2 * b1
             if abs(det) > 1e-3:
-                x = (b1 * c2 - b2 * c1) / det
-                y = (a2 * c1 - a1 * c2) / det
-                corners.append((x, y))
-            else:
-                valid_polygon = False
-                break
+                # Titik potong
+                x_int = (b1 * c2 - b2 * c1) / det
+                y_int = (a2 * c1 - a1 * c2) / det
                 
-        if valid_polygon:
-            for i in range(len(corners)):
-                x1, y1 = corners[i]
-                x2, y2 = corners[(i+1) % len(corners)]
-                wall_seg_data.append((x1, y1, x2, y2))
+                # Proyeksi titik potong ke parameter t masing-masing garis
+                t1_int = -b1 * x_int + a1 * y_int
+                t2_int = -b2 * x_int + a2 * y_int
                 
-    # Fallback jika polygon gagal terbentuk
-    if not wall_seg_data:
-        for count, line in candidates[:N_WALLS]:
-            a, b, c = line
-            t_min = float('inf')
-            t_max = float('-inf')
-            for i in range(len(dense_pts)):
-                px, py = dense_pts[i]
-                if abs(a * px + b * py + c) <= RANSAC_INLIER_THR:
-                    t = -b * px + a * py
-                    if t < t_min: t_min = t
-                    if t > t_max: t_max = t
-            if t_min != float('inf') and t_max != float('-inf'):
-                x1 = -b * t_min - a * c
-                y1 =  a * t_min - b * c
-                x2 = -b * t_max - a * c
-                y2 =  a * t_max - b * c
-                wall_seg_data.append((x1, y1, x2, y2))
+                # Hitung jarak dari titik potong ke batas segmen inlier (jika di luar rentang)
+                dist1 = max(0.0, s1['t_min'] - t1_int, t1_int - s1['t_max'])
+                dist2 = max(0.0, s2['t_min'] - t2_int, t2_int - s2['t_max'])
+                
+                # PERBAIKAN FINAL 4 (SOLUSI SUDUT RAPI):
+                # Kita SELALU memotong atau menyambung garis ke titik perpotongan (snap) 
+                # selama titik perpotongan tersebut masuk akal (kurang dari 100 cm dari batas inlier).
+                # Ini otomatis menghilangkan "ekor" garis yang menyilang (bentuk +) dan
+                # otomatis menutup celah kosong, sehingga membentuk sudut L yang sangat rapi seperti kotak!
+                if dist1 <= 100.0 and dist2 <= 100.0:
+                    if abs(t1_int - s1['t_min']) < abs(t1_int - s1['t_max']):
+                        s1['t_min'] = t1_int
+                    else:
+                        s1['t_max'] = t1_int
+                        
+                    if abs(t2_int - s2['t_min']) < abs(t2_int - s2['t_max']):
+                        s2['t_min'] = t2_int
+                    else:
+                        s2['t_max'] = t2_int
+
+    # 3. Masukkan ke wall_seg_data
+    for s in segments:
+        a, b, c = s['line']
+        t_min = s['t_min']
+        t_max = s['t_max']
+        x1 = -b * t_min - a * c
+        y1 =  a * t_min - b * c
+        x2 = -b * t_max - a * c
+        y2 =  a * t_max - b * c
+        wall_seg_data.append((x1, y1, x2, y2))
 
     # Hitung Phantom Points untuk Dinding (menggunakan segmen kotak jika ada)
     wall_phantom_mask = is_lonely.copy()
@@ -354,9 +311,8 @@ def _detect_best_shape_and_phantoms(sx, sy):
                 wall_phantom_mask[gi] = True
                 continue
                 
-            min_dist = min(_point_to_line_dist(px, py, x1, y1, x2, y2) for x1, y1, x2, y2 in wall_seg_data)
-            if min_dist > PHANTOM_DIST_THR:
-                wall_phantom_mask[gi] = True
+            # PERBAIKAN FINAL 5: Titik di DALAM kotak dibiarkan sebagai inlier dinding (Biru)
+            # Logika jarak > PHANTOM_DIST_THR untuk titik di dalam kotak telah DIHAPUS.
     elif wall_lines:
         for gi in range(n):
             if wall_phantom_mask[gi]:
@@ -373,26 +329,10 @@ def _detect_best_shape_and_phantoms(sx, sy):
                 wall_phantom_mask[gi] = True
                 continue
                 
-            min_dist = min(abs(a * px + b * py + c) for a, b, c in wall_lines)
-            if min_dist > PHANTOM_DIST_THR:
-                wall_phantom_mask[gi] = True
+            # PERBAIKAN FINAL 5: Titik di DALAM kotak dibiarkan sebagai inlier dinding (Biru)
+            # Logika jarak > PHANTOM_DIST_THR untuk titik di dalam kotak telah DIHAPUS.
     wall_phantom_count = wall_phantom_mask.sum()
-
-    if SHAPE_MODE == 'circle' and circle_model is not None:
-        best_shape = 'circle'
-    elif SHAPE_MODE == 'walls':
-        best_shape = 'walls'
-    else:
-        # AUTO MODE
-        if circle_model is not None and circle_phantom_count < wall_phantom_count:
-            best_shape = 'circle'
-        else:
-            best_shape = 'walls'
-            
-    if best_shape == 'circle' and circle_model is not None:
-        return 'circle', circle_model, ~circle_phantom_mask, circle_phantom_mask
-    else:
-        return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
+    return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
 
 
 
@@ -443,12 +383,7 @@ class Visualisasi2D:
             [], colors='#cc2222', linewidths=2.5, linestyles='dashed', alpha=0.9,
             label='Nominal Wall (RANSAC)', zorder=6)
         self.ax.add_collection(self.wall_collection)
-        
-        # Lingkaran nominal (merah, putus-putus)
-        self.circle_patch = plt.Circle((0,0), 10, color='#cc2222', fill=False, linewidth=2.5, ls='dashed', alpha=0.9,
-                                      label='Nominal Circle (RANSAC)', zorder=6)
-        self.circle_patch.set_visible(False)
-        self.ax.add_patch(self.circle_patch)
+        self.ax.add_collection(self.wall_collection)
         
         self.ax.plot(0, 0, 'k+', ms=12, mew=2.5, zorder=7)
 
@@ -470,16 +405,9 @@ class Visualisasi2D:
             'Pemetaan 2D — Menunggu data ESP32...',
             color='#111111', fontsize=13, fontweight='bold', pad=12)
 
-        # Info phantom di pojok kiri bawah
         self.phantom_text = self.ax.text(
             -98, -96, '', fontsize=8, color='#f57c00',
             ha='left', va='bottom', zorder=8)
-
-        # Mode hint di pojok kanan bawah
-        self.mode_text = self.ax.text(
-            98, -96, "Tekan 'M' untuk ubah mode (Auto/Garis/Lingkaran)", 
-            fontsize=8, color='#555555',
-            ha='right', va='bottom', zorder=8)
 
         self.ax.legend(loc='upper right', facecolor='white',
                        labelcolor='#111111', fontsize=8, framealpha=0.9,
@@ -499,25 +427,9 @@ class Visualisasi2D:
             self.ax.plot([0, R*np.cos(r)], [0, R*np.sin(r)],
                         color='#cccccc', lw=0.4, alpha=0.6)
 
-        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
-
         # Mulai thread penerima
         self.thread = threading.Thread(target=self._receive, daemon=True)
         self.thread.start()
-
-    def _on_key(self, event):
-        global SHAPE_MODE
-        if event.key == 'm' or event.key == 'M':
-            if SHAPE_MODE == 'auto':
-                SHAPE_MODE = 'walls'
-            elif SHAPE_MODE == 'walls':
-                SHAPE_MODE = 'circle'
-            else:
-                SHAPE_MODE = 'auto'
-            print(f"[*] Mode diubah ke: {SHAPE_MODE.upper()}")
-            # Force update plot to apply mode immediately if data is stopped
-            if hasattr(self, 'last_paket_count'):
-                self.last_paket_count = -1 
                 
     # ==========================================
     def _receive(self):
@@ -602,11 +514,9 @@ class Visualisasi2D:
             pass
 
     def _fit_rectangle(self, xs, ys):
-        """
-        Fit persegi panjang ke titik-titik point cloud menggunakan PCA.
-        PCA menemukan orientasi utama ruangan secara otomatis,
-        lalu bounding rectangle digambar pada sumbu principal tersebut.
-        """
+        # Fit persegi panjang ke titik-titik point cloud menggunakan PCA.
+        # PCA menemukan orientasi utama ruangan secara otomatis,
+        # lalu bounding rectangle digambar pada sumbu principal tersebut.
         pts = np.column_stack([xs, ys])
         if len(pts) < 10:
             return [], []
@@ -644,7 +554,7 @@ class Visualisasi2D:
         return corners[:, 0].tolist(), corners[:, 1].tolist()
 
     def _build_from_map(self):
-        """Bangun daftar titik terfilter dari stable_map."""
+        # Bangun daftar titik terfilter dari stable_map.
         sx, sy       = [], []
         raw_x, raw_y = [], []
 
@@ -671,10 +581,8 @@ class Visualisasi2D:
         filled   = int(np.count_nonzero(self.stable_map))
         filtered = int(np.sum(self.count_map >= MIN_COUNT))
         
-        mode_str = "AUTO" if SHAPE_MODE == 'auto' else ("KOTAK/GARIS" if SHAPE_MODE == 'walls' else "LINGKARAN")
-
         self.title_obj.set_text(
-            f'Pemetaan 2D | Mode: {mode_str} | '
+            f'Pemetaan 2D | '
             f'{filtered}/{filled} stabil | '
             f'Yaw: {self.current_yaw:.1f}\u00b0 | '
             f'Paket: {self.paket_count}')
@@ -689,7 +597,6 @@ class Visualisasi2D:
             self.scatter_inlier.set_data(sx, sy)
             self.scatter_phantom.set_data([], [])
             self.wall_collection.set_segments([])
-            self.circle_patch.set_visible(False)
             self.phantom_text.set_text('')
         else:
             sx_np = np.array(sx, dtype=float)
@@ -705,16 +612,7 @@ class Visualisasi2D:
             self.scatter_phantom.set_data(sx_np[phantom_mask],
                                           sy_np[phantom_mask])
                                           
-            # Gambar model yang terpilih
-            if shape_type == 'circle':
-                self.wall_collection.set_segments([])
-                if shape_data is not None:
-                    xc, yc, r = shape_data
-                    self.circle_patch.set_center((xc, yc))
-                    self.circle_patch.set_radius(r)
-                    self.circle_patch.set_visible(True)
-            elif shape_type == 'walls':
-                self.circle_patch.set_visible(False)
+            if shape_type == 'walls':
                 if shape_data:
                     self.wall_collection.set_segments(
                         [[(x1, y1), (x2, y2)] for x1, y1, x2, y2 in shape_data])
@@ -722,23 +620,19 @@ class Visualisasi2D:
                     self.wall_collection.set_segments([])
             else:
                 self.wall_collection.set_segments([])
-                self.circle_patch.set_visible(False)
 
             # Info teks
             n_ph  = int(phantom_mask.sum())
             n_tot = len(sx)
             pct   = 100 * n_ph / n_tot if n_tot > 0 else 0
             
-            if shape_type == 'circle':
-                r = shape_data[2] if shape_data else 0
-                shape_text = f' | Shape: Lingkaran (R: {r:.1f}cm)'
-            elif shape_type == 'walls':
+            if shape_type == 'walls':
                 shape_text = f' | Shape: Garis Dinding ({len(shape_data)} segmen)'
             else:
                 shape_text = ''
                 
             self.phantom_text.set_text(
-                f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%){shape_text}')
+                f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%){shape_text} | Tingkat Keberhasilan: {pct:.1f}%')
 
     def save_data(self):
         if not self.record_log:
