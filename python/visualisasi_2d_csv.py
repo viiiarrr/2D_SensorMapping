@@ -60,7 +60,7 @@ MIN_NEIGHBORS     = 3     # minimal tetangga dalam radius → kurang dari ini = 
 # =====================
 # KONFIGURASI CSV
 # =====================
-CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_66\koordinat.csv"
+CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_57\koordinat.csv"
 
 # 47 46 persegi
 # 63 64 bulat
@@ -137,6 +137,23 @@ def _ransac_line(pts):
     return (a, b, c), best_inliers
 
 
+def _fit_circle(pts):
+    # Fit circle using least squares
+    x = pts[:, 0]
+    y = pts[:, 1]
+    
+    A = np.column_stack([x, y, np.ones(len(x))])
+    b = -(x**2 + y**2)
+    
+    # Solve Ax = b
+    res, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    D, E, F = res
+    cx = -D / 2
+    cy = -E / 2
+    r = np.sqrt(max(0, cx**2 + cy**2 - F))
+    
+    return cx, cy, r
+
 def _split_and_merge(pts_idx, points, depth=0):
     """
     Rekursif Split-and-Merge.
@@ -188,6 +205,12 @@ def _detect_best_shape_and_phantoms(sx, sy):
 
     if len(dense_pts) < MIN_SEGMENT_PTS:
         return 'none', None, ~is_lonely, is_lonely
+
+    # --- Test Circle ---
+    cx, cy, r_circ = _fit_circle(dense_pts)
+    dists_c = np.abs(np.hypot(dense_pts[:, 0] - cx, dense_pts[:, 1] - cy) - r_circ)
+    circle_inlier_mask = dists_c < RANSAC_INLIER_THR
+    circle_inlier_count = np.sum(circle_inlier_mask)
 
     # --- Test Dinding (Garis) ---
     remaining = dense_pts.copy()
@@ -329,10 +352,31 @@ def _detect_best_shape_and_phantoms(sx, sy):
                 wall_phantom_mask[gi] = True
                 continue
                 
-            # PERBAIKAN FINAL 5: Titik di DALAM kotak dibiarkan sebagai inlier dinding (Biru)
-            # Logika jarak > PHANTOM_DIST_THR untuk titik di dalam kotak telah DIHAPUS.
+            # Titik yang jaraknya lebih dari PHANTOM_DIST_THR dari garis terdekat = phantom
+            min_dist = float('inf')
+            for a, b, c in wall_lines:
+                d = abs(a * px + b * py + c)
+                if d < min_dist:
+                    min_dist = d
+                    
+            if min_dist > PHANTOM_DIST_THR:
+                wall_phantom_mask[gi] = True
+                continue
     wall_phantom_count = wall_phantom_mask.sum()
-    return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
+    
+    if SHAPE_MODE == 'circle' or (SHAPE_MODE == 'auto' and circle_inlier_count > wall_inlier_count):
+        # Kembalikan mode lingkaran
+        full_circle_inlier_mask = np.zeros(n, dtype=bool)
+        dists_all = np.abs(np.hypot(sx_np - cx, sy_np - cy) - r_circ)
+        full_circle_inlier_mask = dists_all < PHANTOM_DIST_THR
+        
+        phantom_mask_c = ~full_circle_inlier_mask
+        # Paksa lonely points jadi phantom
+        phantom_mask_c[is_lonely] = True
+        return 'circle', (cx, cy, r_circ), ~phantom_mask_c, phantom_mask_c
+    else:
+        return 'walls', wall_seg_data, ~wall_phantom_mask, wall_phantom_mask
+
 
 
 
@@ -383,8 +427,12 @@ class Visualisasi2D:
             [], colors='#cc2222', linewidths=2.5, linestyles='dashed', alpha=0.9,
             label='Nominal Wall (RANSAC)', zorder=6)
         self.ax.add_collection(self.wall_collection)
-        self.ax.add_collection(self.wall_collection)
         
+        self.circle_patch = plt.Circle((0, 0), 10, fill=False, edgecolor='#cc2222', 
+                                       linewidth=2.5, linestyle='dashed', alpha=0.9, zorder=6)
+        self.circle_patch.set_visible(False)
+        self.ax.add_patch(self.circle_patch)
+
         self.ax.plot(0, 0, 'k+', ms=12, mew=2.5, zorder=7)
 
         # Batas tampilan & dekorasi
@@ -430,6 +478,12 @@ class Visualisasi2D:
         # Mulai thread penerima
         self.thread = threading.Thread(target=self._receive, daemon=True)
         self.thread.start()
+        
+        # Variabel untuk summary skripsi
+        self.last_n_ph = 0
+        self.last_n_tot = 0
+        self.last_shape_type = 'none'
+        self.last_shape_data = []
                 
     # ==========================================
     def _receive(self):
@@ -557,6 +611,7 @@ class Visualisasi2D:
         # Bangun daftar titik terfilter dari stable_map.
         sx, sy       = [], []
         raw_x, raw_y = [], []
+        angles       = []
 
         for i in range(360):
             d = self.stable_map[i]
@@ -569,8 +624,9 @@ class Visualisasi2D:
                 if self.count_map[i] >= MIN_COUNT:
                     sx.append(x)
                     sy.append(y)
+                    angles.append(i)
 
-        return sx, sy, raw_x, raw_y
+        return sx, sy, raw_x, raw_y, angles
 
     def _update_plot(self, frame):
         # Hentikan update (mencegah jitter RANSAC) jika data CSV sudah selesai / tidak ada paket baru
@@ -590,7 +646,7 @@ class Visualisasi2D:
         if filled == 0:
             return
 
-        sx, sy, raw_x, raw_y = self._build_from_map()
+        sx, sy, raw_x, raw_y, angles = self._build_from_map()
         self.boundary.set_data(raw_x, raw_y)
 
         if len(sx) < MIN_SEGMENT_PTS * 2:
@@ -618,8 +674,16 @@ class Visualisasi2D:
                         [[(x1, y1), (x2, y2)] for x1, y1, x2, y2 in shape_data])
                 else:
                     self.wall_collection.set_segments([])
+                self.circle_patch.set_visible(False)
+            elif shape_type == 'circle':
+                self.wall_collection.set_segments([])
+                cx, cy, r = shape_data
+                self.circle_patch.center = (cx, cy)
+                self.circle_patch.set_radius(r)
+                self.circle_patch.set_visible(True)
             else:
                 self.wall_collection.set_segments([])
+                self.circle_patch.set_visible(False)
 
             # Info teks
             n_ph  = int(phantom_mask.sum())
@@ -628,11 +692,19 @@ class Visualisasi2D:
             
             if shape_type == 'walls':
                 shape_text = f' | Shape: Garis Dinding ({len(shape_data)} segmen)'
+            elif shape_type == 'circle':
+                shape_text = f' | Shape: Lingkaran (R={r:.1f})'
             else:
                 shape_text = ''
                 
             self.phantom_text.set_text(
                 f'Phantom: {n_ph}/{n_tot} titik ({pct:.1f}%){shape_text} | Tingkat Keberhasilan: {pct:.1f}%')
+            
+            # Simpan state terakhir untuk summary skripsi saat program ditutup
+            self.last_n_ph = n_ph
+            self.last_n_tot = n_tot
+            self.last_shape_type = shape_type
+            self.last_shape_data = shape_data
 
     def save_data(self):
         if not self.record_log:
@@ -653,9 +725,50 @@ class Visualisasi2D:
         self.fig.savefig(os.path.join(d, "peta_2d.png"),
                          dpi=300, bbox_inches='tight',
                          facecolor='white')
+                         
+        # Export Evaluasi NWA
+        sx, sy, raw_x, raw_y, angles = self._build_from_map()
+        if len(sx) >= MIN_SEGMENT_PTS * 2:
+            sx_np = np.array(sx, dtype=float)
+            sy_np = np.array(sy, dtype=float)
+            _, _, _, phantom_mask = _detect_best_shape_and_phantoms(sx_np.tolist(), sy_np.tolist())
+            
+            eval_path = os.path.join(d, "evaluasi_nwa.csv")
+            with open(eval_path, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(["Sudut", "X", "Y", "NWA_Phantom_Terdeteksi", "Anomali_Asli_Manual"])
+                for i in range(len(sx)):
+                    w.writerow([angles[i], round(sx[i], 2), round(sy[i], 2), int(phantom_mask[i]), ""])
+            print(f"    [+] Template Evaluasi NWA tersimpan: {eval_path}")
+            
         print(f"\n[+] Tersimpan: {d}")
         print(f"    {len(self.record_log)} baris | "
               f"{int(np.count_nonzero(self.stable_map))}/360 sudut terpetakan")
+
+        # ==========================================
+        # PRINT RINGKASAN HASIL UNTUK SKRIPSI
+        # ==========================================
+        print("\n==================================================")
+        print("           HASIL PERHITUNGAN SKRIPSI              ")
+        print("==================================================")
+        print("1. TINGKAT KEBERHASILAN ALGORITMA NWA:")
+        print(f"   - Jumlah Titik Semu Terbuang (Oleh NWA) : {self.last_n_ph} titik")
+        print("   (Hitung persentase dengan membagi angka di atas")
+        print("    terhadap Total Titik Semu (Ground Truth) Anda)")
+        
+        print("\n2. AKURASI DIMENSI PETA 2D (Hasil Estimasi):")
+        if self.last_shape_type == 'walls' and self.last_shape_data:
+            for idx, (x1, y1, x2, y2) in enumerate(self.last_shape_data):
+                panjang = np.hypot(x2 - x1, y2 - y1)
+                print(f"   - Panjang Dinding {idx+1} : {panjang:.2f} cm")
+        elif self.last_shape_type == 'circle' and self.last_shape_data:
+            cx, cy, r = self.last_shape_data
+            print(f"   - Lingkaran Terdeteksi | Jari-jari (R) : {r:.2f} cm")
+            print(f"   - Pusat Lingkaran (X, Y)               : ({cx:.2f}, {cy:.2f})")
+        else:
+            print("   - Tidak ada bentuk/dinding yang terdeteksi dengan jelas.")
+            
+        print("==================================================\n")
 
     def start(self):
         self.anim = FuncAnimation(
