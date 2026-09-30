@@ -47,20 +47,20 @@ N_WALLS           = 4      # Jumlah dinding maksimum (4 = persegi/kotak)
 
 # RANSAC
 RANSAC_ITER       = 150   # Jumlah iterasi RANSAC
-RANSAC_INLIER_THR = 8.0   # cm — jarak titik ke garis/lingkaran agar dianggap inlier
+RANSAC_INLIER_THR = 4.0   # cm — jarak titik ke garis/lingkaran agar dianggap inlier
 MIN_SEGMENT_PTS   = 30    # Jumlah titik minimum per dinding (dinaikkan agar noise tidak jadi dinding)
 
 # NWA threshold
-PHANTOM_DIST_THR  = 5.0   # cm — jika jarak ke model terdekat > ini → phantom (disamakan dengan RANSAC_INLIER_THR)
+PHANTOM_DIST_THR  = 4.0   # cm — jika jarak ke model terdekat > ini → phantom (disamakan dengan RANSAC_INLIER_THR)
 
 # Filter densitas — buang titik terpencil sebelum RANSAC
-DENSITY_RADIUS    = 20.0  # cm — radius pencarian tetangga
-MIN_NEIGHBORS     = 3     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
+DENSITY_RADIUS    = 10.0  # cm — radius pencarian tetangga
+MIN_NEIGHBORS     = 5     # minimal tetangga dalam radius → kurang dari ini = lonely = phantom
 
 # =====================
 # KONFIGURASI CSV
 # =====================
-CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_57\koordinat.csv"
+CSV_FILE_PATH = r"e:\code_skripsi\TugasAkhir\Data\percobaan_47\koordinat.csv"
 
 # 47 46 persegi
 # 63 64 bulat
